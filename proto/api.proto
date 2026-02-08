@@ -1,0 +1,48 @@
+enum TaskStatus {
+  QUEUED = 0;
+  INPROGRESS = 1;
+  COMPLETED = 2;
+  FAILED = 3;
+}
+
+message TaskRequest {
+  string task_id = 0
+  string data = 1
+}
+
+message TaskResponse {
+  string task_id = 0;
+  string message = 1;
+  bool success = 2;
+
+}
+
+service WorkerService {
+  rpc SubmitTask (TaskRequest) returns (TaskResponse) {};
+}
+
+service CoordinatorService {
+  rpc SendHeartbeat (HeartbeatRequest) returns (HeartBeatResponse) {};
+  rpc UpdateStatus (UpdateStatusRequest) returns (UpdateStatusRespone) {};
+}
+
+message UpdateStatusRequest {
+  TaskStatus status = 0;
+  string task_id = 1;
+  int64 started_at = 2;
+  int64 completed_at = 3;
+  int64 failed_at = 4;
+}
+
+message UpdateStatusResponse {
+  bool success = 1;
+}
+
+message HeartbeatRequest {
+  string workerId = 0;
+  string address = 1;
+}
+
+message HeartBeatResponse {
+  bool acknowledged = 1;
+}
