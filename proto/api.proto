@@ -1,3 +1,9 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "./proto";
+
 enum TaskStatus {
   QUEUED = 0;
   INPROGRESS = 1;
@@ -6,14 +12,14 @@ enum TaskStatus {
 }
 
 message TaskRequest {
-  string task_id = 0
-  string data = 1
+  string task_id = 1;
+  string data = 2;
 }
 
 message TaskResponse {
-  string task_id = 0;
-  string message = 1;
-  bool success = 2;
+  string task_id = 1;
+  string message = 2;
+  bool success = 3;
 
 }
 
@@ -23,15 +29,15 @@ service WorkerService {
 
 service CoordinatorService {
   rpc SendHeartbeat (HeartbeatRequest) returns (HeartBeatResponse) {};
-  rpc UpdateStatus (UpdateStatusRequest) returns (UpdateStatusRespone) {};
+  rpc UpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse) {};
 }
 
 message UpdateStatusRequest {
-  TaskStatus status = 0;
-  string task_id = 1;
-  int64 started_at = 2;
-  int64 completed_at = 3;
-  int64 failed_at = 4;
+  TaskStatus status = 1;
+  string task_id = 2;
+  int64 started_at = 3;
+  int64 completed_at = 4;
+  int64 failed_at = 5;
 }
 
 message UpdateStatusResponse {
@@ -39,8 +45,8 @@ message UpdateStatusResponse {
 }
 
 message HeartbeatRequest {
-  string workerId = 0;
-  string address = 1;
+  string workerId = 1;
+  string address = 2;
 }
 
 message HeartBeatResponse {
