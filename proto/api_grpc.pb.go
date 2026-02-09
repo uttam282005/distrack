@@ -121,8 +121,8 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	CoordinatorService_SendHeartbeat_FullMethodName = "/proto.CoordinatorService/SendHeartbeat"
-	CoordinatorService_UpdateStatus_FullMethodName  = "/proto.CoordinatorService/UpdateStatus"
+	CoordinatorService_SendHeartbeat_FullMethodName    = "/proto.CoordinatorService/SendHeartbeat"
+	CoordinatorService_UpdateTaskStatus_FullMethodName = "/proto.CoordinatorService/UpdateTaskStatus"
 )
 
 // CoordinatorServiceClient is the client API for CoordinatorService service.
@@ -130,7 +130,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type CoordinatorServiceClient interface {
 	SendHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartBeatResponse, error)
-	UpdateStatus(ctx context.Context, in *UpdateStatusRequest, opts ...grpc.CallOption) (*UpdateStatusResponse, error)
+	UpdateTaskStatus(ctx context.Context, in *UpdateStatusRequest, opts ...grpc.CallOption) (*UpdateStatusResponse, error)
 }
 
 type coordinatorServiceClient struct {
@@ -151,10 +151,10 @@ func (c *coordinatorServiceClient) SendHeartbeat(ctx context.Context, in *Heartb
 	return out, nil
 }
 
-func (c *coordinatorServiceClient) UpdateStatus(ctx context.Context, in *UpdateStatusRequest, opts ...grpc.CallOption) (*UpdateStatusResponse, error) {
+func (c *coordinatorServiceClient) UpdateTaskStatus(ctx context.Context, in *UpdateStatusRequest, opts ...grpc.CallOption) (*UpdateStatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UpdateStatusResponse)
-	err := c.cc.Invoke(ctx, CoordinatorService_UpdateStatus_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, CoordinatorService_UpdateTaskStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func (c *coordinatorServiceClient) UpdateStatus(ctx context.Context, in *UpdateS
 // for forward compatibility.
 type CoordinatorServiceServer interface {
 	SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartBeatResponse, error)
-	UpdateStatus(context.Context, *UpdateStatusRequest) (*UpdateStatusResponse, error)
+	UpdateTaskStatus(context.Context, *UpdateStatusRequest) (*UpdateStatusResponse, error)
 	mustEmbedUnimplementedCoordinatorServiceServer()
 }
 
@@ -180,8 +180,8 @@ type UnimplementedCoordinatorServiceServer struct{}
 func (UnimplementedCoordinatorServiceServer) SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartBeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SendHeartbeat not implemented")
 }
-func (UnimplementedCoordinatorServiceServer) UpdateStatus(context.Context, *UpdateStatusRequest) (*UpdateStatusResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method UpdateStatus not implemented")
+func (UnimplementedCoordinatorServiceServer) UpdateTaskStatus(context.Context, *UpdateStatusRequest) (*UpdateStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateTaskStatus not implemented")
 }
 func (UnimplementedCoordinatorServiceServer) mustEmbedUnimplementedCoordinatorServiceServer() {}
 func (UnimplementedCoordinatorServiceServer) testEmbeddedByValue()                            {}
@@ -222,20 +222,20 @@ func _CoordinatorService_SendHeartbeat_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
-func _CoordinatorService_UpdateStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _CoordinatorService_UpdateTaskStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateStatusRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CoordinatorServiceServer).UpdateStatus(ctx, in)
+		return srv.(CoordinatorServiceServer).UpdateTaskStatus(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: CoordinatorService_UpdateStatus_FullMethodName,
+		FullMethod: CoordinatorService_UpdateTaskStatus_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CoordinatorServiceServer).UpdateStatus(ctx, req.(*UpdateStatusRequest))
+		return srv.(CoordinatorServiceServer).UpdateTaskStatus(ctx, req.(*UpdateStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -252,8 +252,8 @@ var CoordinatorService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CoordinatorService_SendHeartbeat_Handler,
 		},
 		{
-			MethodName: "UpdateStatus",
-			Handler:    _CoordinatorService_UpdateStatus_Handler,
+			MethodName: "UpdateTaskStatus",
+			Handler:    _CoordinatorService_UpdateTaskStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

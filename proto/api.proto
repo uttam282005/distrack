@@ -29,7 +29,7 @@ service WorkerService {
 
 service CoordinatorService {
   rpc SendHeartbeat (HeartbeatRequest) returns (HeartBeatResponse) {};
-  rpc UpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse) {};
+  rpc UpdateTaskStatus (UpdateStatusRequest) returns (UpdateStatusResponse) {};
 }
 
 message UpdateStatusRequest {

@@ -438,10 +438,10 @@ const file_proto_api_proto_rawDesc = "" +
 	"\x06FAILED\x10\x032H\n" +
 	"\rWorkerService\x127\n" +
 	"\n" +
-	"SubmitTask\x12\x12.proto.TaskRequest\x1a\x13.proto.TaskResponse\"\x002\xa5\x01\n" +
+	"SubmitTask\x12\x12.proto.TaskRequest\x1a\x13.proto.TaskResponse\"\x002\xa9\x01\n" +
 	"\x12CoordinatorService\x12D\n" +
-	"\rSendHeartbeat\x12\x17.proto.HeartbeatRequest\x1a\x18.proto.HeartBeatResponse\"\x00\x12I\n" +
-	"\fUpdateStatus\x12\x1a.proto.UpdateStatusRequest\x1a\x1b.proto.UpdateStatusResponse\"\x00B\tZ\a./protob\x06proto3"
+	"\rSendHeartbeat\x12\x17.proto.HeartbeatRequest\x1a\x18.proto.HeartBeatResponse\"\x00\x12M\n" +
+	"\x10UpdateTaskStatus\x12\x1a.proto.UpdateStatusRequest\x1a\x1b.proto.UpdateStatusResponse\"\x00B\tZ\a./protob\x06proto3"
 
 var (
 	file_proto_api_proto_rawDescOnce sync.Once
@@ -470,10 +470,10 @@ var file_proto_api_proto_depIdxs = []int32{
 	0, // 0: proto.UpdateStatusRequest.status:type_name -> proto.TaskStatus
 	1, // 1: proto.WorkerService.SubmitTask:input_type -> proto.TaskRequest
 	5, // 2: proto.CoordinatorService.SendHeartbeat:input_type -> proto.HeartbeatRequest
-	3, // 3: proto.CoordinatorService.UpdateStatus:input_type -> proto.UpdateStatusRequest
+	3, // 3: proto.CoordinatorService.UpdateTaskStatus:input_type -> proto.UpdateStatusRequest
 	2, // 4: proto.WorkerService.SubmitTask:output_type -> proto.TaskResponse
 	6, // 5: proto.CoordinatorService.SendHeartbeat:output_type -> proto.HeartBeatResponse
-	4, // 6: proto.CoordinatorService.UpdateStatus:output_type -> proto.UpdateStatusResponse
+	4, // 6: proto.CoordinatorService.UpdateTaskStatus:output_type -> proto.UpdateStatusResponse
 	4, // [4:7] is the sub-list for method output_type
 	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
