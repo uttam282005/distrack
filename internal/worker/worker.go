@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,7 +20,8 @@ import (
 )
 
 const (
-	DefaultHeartBeat int = 3
+	DefaultHeartBeat      = 3
+	defaultWorkerPoolSize = 5
 )
 
 type WorkerServer struct {
@@ -84,6 +87,42 @@ func (w *WorkerServer) closeGRPCConnection() {
 	}
 }
 
+func (w *WorkerServer) Start() error {
+	w.SetUpWorkerPool(defaultWorkerPoolSize)
+
+	err := w.ConnectToCoordinator()
+	if err != nil {
+		return fmt.Errorf("failed to connect to the coordinator")
+	}
+	defer w.closeGRPCConnection()
+
+	go w.periodicHeartbeat()
+
+	if err := w.startGRPCServer(); err != nil {
+		return fmt.Errorf("failed to start worker grpc server: %w", err)
+	}
+
+	return w.awaitAndStop()
+}
+
+func (w *WorkerServer) awaitAndStop() error {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	return w.Stop()
+}
+
+func (w *WorkerServer) Stop() error {
+	w.cancel()
+
+	w.wg.Wait()
+
+	w.closeGRPCConnection()
+	log.Println("Worker server stopped")
+	return nil
+}
+
 func (w *WorkerServer) startGRPCServer() error {
 	var err error
 
@@ -125,6 +164,26 @@ func (w *WorkerServer) ConnectToCoordinator() error {
 	w.coordinatorServiceClient = pb.NewCoordinatorServiceClient(conn)
 
 	return nil
+}
+
+func (w *WorkerServer) periodicHeartbeat() {
+	w.wg.Add(1)
+	defer w.wg.Done()
+
+	ticker := time.NewTicker(w.heartbeatInterval * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := w.sendHeartbeat(); err != nil {
+				log.Printf("Failed to send heartbeat: %v", err)
+				return
+			}
+		case <-w.ctx.Done():
+			return
+		}
+	}
 }
 
 func (w *WorkerServer) SetUpWorkerPool(workerPoolSize int) {
