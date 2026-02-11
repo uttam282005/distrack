@@ -27,3 +27,6 @@ env.bash
 
 # docker-compose volume
 data/
+
+# temp fies for minor local testing
+temp
