@@ -21,9 +21,14 @@ type SchduleTaskRequest struct {
 	ScheduledAt string `json:"scheduled_at"` // ISO 8601 format
 }
 
-type SchduleTaskResponse struct {
-	Success bool   `json:"success"`
-	TaskID  string `json:"taskId"`
+type TaskResponse struct {
+	TaskID      string `json:"task_id"`
+	Command     string `json:"command"`
+	ScheduledAt string `json:"scheduled_at,omitempty"`
+	PickedAt    string `json:"picked_at,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	FailedAt    string `json:"failed_at,omitempty"`
 }
 
 type Task struct {
@@ -73,7 +78,7 @@ func (s *SchedulerServer) Start() error {
 	log.Printf("Starting scheduler server on %s\n", s.serverPort)
 
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && er != http.ErrServerClosed {
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %s\n", err)
 		}
 	}()
@@ -87,10 +92,7 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var (
-		commandRequest  SchduleTaskRequest
-		commandResponse SchduleTaskResponse
-	)
+	var commandRequest SchduleTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&commandRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -116,9 +118,14 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	commandResponse.TaskID = taskID
-	commandResponse.Success = true
-
+	commandResponse := TaskResponse{
+		TaskID:      taskID,
+		Command:     commandRequest.Command,
+		ScheduledAt: commandRequest.ScheduledAt,
+		FailedAt:    "",
+		CompletedAt: "",
+		StartedAt:   "",
+	}
 	jsonResponse, err := json.Marshal(commandResponse)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -127,7 +134,71 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 	w.Write(jsonResponse)
 }
 
-func (s *SchedulerServer) handleTaskStatus() {
+func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Only POST request is allowerd", http.StatusMethodNotAllowed)
+		return
+	}
+
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		http.Error(w, "Task ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var task Task
+	err := s.dbPool.QueryRow(context.Background(), "SELECT * FROM tasks WHERE id = $1", taskID).Scan(&task.Id, &task.Command, &task.ScheduledAt, &task.PickedAt, &task.StartedAt, &task.CompletedAt, &task.FailedAt)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get task status. Error: %s", err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	taskResponse := TaskResponse{
+		TaskID: task.Id,
+		Command: task.Command,
+		PickedAt: "",
+		ScheduledAt: "",
+		FailedAt: "",
+		CompletedAt: "",
+	}
+
+	// Set the schedule_at time if non-null
+if task.ScheduledAt.Status == pgtype.Present {
+	taskResponse.ScheduledAt = task.ScheduledAt.Time.String()
+	}
+
+	// Set the picked_at time if non-null.
+	if task.PickedAt.Status == pgtype.Present {
+		taskResponse.PickedAt = task.PickedAt.Time.String()
+	}
+
+	// Set the started_at time if non-null.
+	if task.StartedAt.Status == pgtype.Present {
+		taskResponse.StartedAt = task.StartedAt.Time.String()
+	}
+
+	// Set the completed_at time if non-null.
+	if task.CompletedAt.Status == pgtype.Present {
+		taskResponse.CompletedAt = task.CompletedAt.Time.String()
+	}
+
+	// Set the failed_at time if non-null.
+	if task.FailedAt.Status == pgtype.Present {
+		taskResponse.FailedAt = task.FailedAt.Time.String()
+	}
+
+	// Convert the taskResponse struct to JSON
+	jsonResponse, err := json.Marshal(taskResponse)
+	if err != nil {
+		http.Error(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+
+	// Set the Content-Type header to application/json
+	w.Header().Set("Content-Type", "application/json")
+
+	// Write the JSON taskResponse
+	w.Write(jsonResponse)
 }
 
 func (s *SchedulerServer) insertIntoDB(ctx context.Context, task Task) (string, error) {
