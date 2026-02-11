@@ -32,7 +32,7 @@ type TaskResponse struct {
 }
 
 type Task struct {
-	Id          string
+	ID          string
 	Command     string
 	ScheduledAt pgtype.Timestamp
 	PickedAt    pgtype.Timestamp
@@ -147,14 +147,14 @@ func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	var task Task
-	err := s.dbPool.QueryRow(context.Background(), "SELECT * FROM tasks WHERE id = $1", taskID).Scan(&task.Id, &task.Command, &task.ScheduledAt, &task.PickedAt, &task.StartedAt, &task.CompletedAt, &task.FailedAt)
+	err := s.dbPool.QueryRow(context.Background(), "SELECT * FROM tasks WHERE id = $1", taskID).Scan(&task.ID, &task.Command, &task.ScheduledAt, &task.PickedAt, &task.StartedAt, &task.CompletedAt, &task.FailedAt)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get task status. Error: %s", err.Error()), http.StatusInternalServerError)
 		return
 	}
 
 	taskResponse := TaskResponse{
-		TaskID: task.Id,
+		TaskID: task.ID,
 		Command: task.Command,
 		PickedAt: "",
 		ScheduledAt: "",
