@@ -3,13 +3,24 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/uttam282005/distrack/internal/common"
+	"github.com/uttam282005/distrack/internal/db"
 	pb "github.com/uttam282005/distrack/proto"
 	"google.golang.org/grpc"
+)
+
+const (
+	defaultMaxMisses = 3
 )
 
 type CoordinatorServer struct {
@@ -37,4 +48,83 @@ type WorkerInfo struct {
 	conn                *grpc.ClientConn
 	address             string
 	workerServiceClient *pb.WorkerServiceClient
+}
+
+func NewServer(port string, dbConnectionString string) *CoordinatorServer {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &CoordinatorServer{
+		WorkerPool:         make(map[uint32]*WorkerInfo),
+		maxHeartbeatMisses: defaultMaxMisses,
+		heartbeatInterval:  common.DefaultHeartbeat,
+		dbConnectionString: dbConnectionString,
+		serverPort:         port,
+		ctx:                ctx,
+		cancel:             cancel,
+	}
+}
+
+func (c *CoordinatorServer) Start() error {
+	var err error
+	go c.manageWorkerPool()
+
+	if err = c.startGRPCServer(); err != nil {
+		return fmt.Errorf("gRPC server start failed: %w", err)
+	}
+
+	c.dbPool, err = db.ConnectToDatabase(c.ctx, c.dbConnectionString)
+	if err != nil {
+		return err
+	}
+
+	go c.scanDatabase()
+
+	return c.awaitShutdown()
+}
+
+func (c *CoordinatorServer) manageWorkerPool() {
+
+}
+
+func (c *CoordinatorServer) startGRPCServer() error {
+	var err error
+
+	if c.serverPort == "" {
+		// Find a free port using a temporary socket
+		c.listener, err = net.Listen("tcp", ":0")                                // Bind to any available port
+		c.serverPort = fmt.Sprintf(":%d", c.listener.Addr().(*net.TCPAddr).Port) // Get the assigned port
+	} else {
+		c.listener, err = net.Listen("tcp", c.serverPort)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", c.serverPort, err)
+	}
+
+	log.Printf("Starting worker server on %s\n", c.serverPort)
+	c.grpcServer = grpc.NewServer()
+	pb.RegisterCoordinatorServiceServer(c.grpcServer, c)
+
+	go func() {
+		if err := c.grpcServer.Serve(c.listener); err != nil {
+			log.Fatalf("gRPC server failed: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func (c *CoordinatorServer) scanDatabase() {
+
+}
+
+func (c *CoordinatorServer) awaitShutdown() {
+	stop := make(chan os.Signal)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	return c.Stop()
+}
+
+func (c *CoordinatorServer) Stop() {
+
 }

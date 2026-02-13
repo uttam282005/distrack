@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/uttam282005/distrack/internal/db"
 )
 
 type SchduleTaskRequest struct {
@@ -62,7 +63,7 @@ func NewServer(port string, dbConnectionString string) *SchedulerServer {
 
 func (s *SchedulerServer) Start() error {
 	var err error
-	s.dbPool, err = s.connectToDatabase(s.ctx)
+	s.dbPool, err = db.ConnectToDatabase(s.ctx, s.dbConnectionString)
 	if err != nil {
 		log.Printf("database connection failed: %v", err)
 		return err
@@ -211,29 +212,6 @@ func (s *SchedulerServer) insertIntoDB(ctx context.Context, task Task) (string, 
 	}
 
 	return taskID, nil
-}
-
-func (s *SchedulerServer) connectToDatabase(ctx context.Context) (*pgxpool.Pool, error) {
-	var dbPool *pgxpool.Pool
-	var err error
-	retryCount := 0
-	for retryCount < 5 {
-		dbPool, err = pgxpool.New(ctx, s.dbConnectionString)
-		if err == nil {
-			break
-		}
-		log.Printf("Failed to connect to the database. Retrying in 5 seconds...")
-		time.Sleep(5 * time.Second)
-		retryCount++
-	}
-
-	if err != nil {
-		log.Printf("Ran out of retries to connect to database (5)")
-		return nil, err
-	}
-
-	log.Printf("Connected to the database.")
-	return dbPool, nil
 }
 
 func (s *SchedulerServer) awaitShutdown() error {
