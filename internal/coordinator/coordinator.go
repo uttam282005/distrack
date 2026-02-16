@@ -152,3 +152,34 @@ func (c *CoordinatorServer) Stop() error {
 
 	return nil
 }
+
+func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.UpdateStatusRequest) (*pb.UpdateStatusResponse, error) {
+	taskID := req.GetTaskId()
+	status := req.GetStatus()
+	var field string
+	var value int64
+
+	switch status {
+	case pb.TaskStatus_COMPLETED:
+		field = "completed_at"
+		value = req.GetCompletedAt()
+
+	case pb.TaskStatus_FAILED:
+		field = "failed_at"
+		value = req.GetFailedAt()
+
+	case pb.TaskStatus_INPROGRESS:
+		field = "started_at"
+		value = req.GetStartedAt()
+	}
+
+	timestamp:= time.Unix(value, 0)
+	sqlStatement := fmt.Sprintf("update tasks set %s=%s where id=%s", field, timestamp)
+	_, err := c.dbPool.Exec(ctx, sqlStatement, timestamp, taskID)
+	if err != nil {
+		log.Printf("Could not update task status for task %s: %+v", taskID, err)
+		return nil, err
+	}
+
+	return &pb.UpdateStatusResponse{Success: true}, nil
+}
