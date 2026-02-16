@@ -82,7 +82,6 @@ func (c *CoordinatorServer) Start() error {
 }
 
 func (c *CoordinatorServer) manageWorkerPool() {
-
 }
 
 func (c *CoordinatorServer) startGRPCServer() error {
@@ -114,17 +113,42 @@ func (c *CoordinatorServer) startGRPCServer() error {
 }
 
 func (c *CoordinatorServer) scanDatabase() {
-
 }
 
-func (c *CoordinatorServer) awaitShutdown() {
-	stop := make(chan os.Signal)
+func (c *CoordinatorServer) awaitShutdown() error {
+	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
 	return c.Stop()
 }
 
-func (c *CoordinatorServer) Stop() {
+func (c *CoordinatorServer) Stop() error {
+	c.cancel()
+	c.wg.Wait()
 
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+
+	for id, worker := range c.WorkerPool {
+		if worker.conn != nil {
+			if err := worker.conn.Close(); err != nil {
+				log.Printf("failed to close connection for worker %d: %v", id, err)
+			}
+		}
+	}
+
+	if c.grpcServer != nil {
+		c.grpcServer.GracefulStop()
+	}
+
+	if c.listener != nil {
+		if err := c.listener.Close(); err != nil {
+			return fmt.Errorf("failed to close coordinator listener: %w", err)
+		}
+	}
+
+	c.dbPool.Close()
+
+	return nil
 }
