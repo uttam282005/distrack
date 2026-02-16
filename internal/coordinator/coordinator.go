@@ -17,10 +17,12 @@ import (
 	"github.com/uttam282005/distrack/internal/db"
 	pb "github.com/uttam282005/distrack/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
 	defaultMaxMisses = 3
+	scanInterval     = common.DefaultHeartbeat * defaultMaxMisses
 )
 
 type CoordinatorServer struct {
@@ -29,9 +31,9 @@ type CoordinatorServer struct {
 	serverPort          string
 	listener            net.Listener
 	grpcServer          *grpc.Server
-	WorkerPool          map[uint32]*WorkerInfo
+	WorkerPool          map[string]*WorkerInfo
 	WorkerPoolMutex     sync.Mutex
-	WorkerPoolKeys      []uint32
+	WorkerPoolKeys      []string
 	WorkerPoolKeysMutex sync.RWMutex
 	maxHeartbeatMisses  uint8
 	heartbeatInterval   time.Duration
@@ -47,13 +49,13 @@ type WorkerInfo struct {
 	heartbeatMisses     uint8
 	conn                *grpc.ClientConn
 	address             string
-	workerServiceClient *pb.WorkerServiceClient
+	workerServiceClient pb.WorkerServiceClient
 }
 
 func NewServer(port string, dbConnectionString string) *CoordinatorServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &CoordinatorServer{
-		WorkerPool:         make(map[uint32]*WorkerInfo),
+		WorkerPool:         make(map[string]*WorkerInfo),
 		maxHeartbeatMisses: defaultMaxMisses,
 		heartbeatInterval:  common.DefaultHeartbeat,
 		dbConnectionString: dbConnectionString,
@@ -81,7 +83,90 @@ func (c *CoordinatorServer) Start() error {
 	return c.awaitShutdown()
 }
 
+func (c *CoordinatorServer) scanDatabase() {
+	ticker := time.NewTicker(scanInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			go c.executeAllScheduledTasks()
+		case <-c.ctx.Done():
+			log.Println("Shutting down database scanner.")
+			return
+		}
+	}
+}
+
+func (c *CoordinatorServer) executeAllScheduledTasks() {
+}
+
+func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartBeatResponse, error) {
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+
+	workerID := req.GetWorkerId()
+	if worker, ok := c.WorkerPool[workerID]; ok {
+		worker.heartbeatMisses = 0
+	} else {
+		conn, err := grpc.NewClient(req.GetAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("failed to connect to the worker: %s\n", workerID)
+		}
+		worker := &WorkerInfo{
+			address:             req.GetAddress(),
+			conn:                conn,
+			heartbeatMisses:     0,
+			workerServiceClient: pb.NewWorkerServiceClient(conn),
+		}
+
+		c.WorkerPool[workerID] = worker
+		c.regenWorkerKeys()
+	}
+
+	return &pb.HeartBeatResponse{
+		Acknowledged: true,
+	}, nil
+}
+
+func (c *CoordinatorServer) regenWorkerKeys() {
+	c.WorkerPoolKeysMutex.Lock()
+	defer c.WorkerPoolKeysMutex.Unlock()
+
+	workerCount := len(c.WorkerPool)
+	c.WorkerPoolKeys = make([]string, workerCount)
+
+	for workerID := range c.WorkerPool {
+		c.WorkerPoolKeys = append(c.WorkerPoolKeys, workerID)
+	}
+}
+
 func (c *CoordinatorServer) manageWorkerPool() {
+	ticker := time.Tick(scanInterval * time.Second)
+
+	for {
+		select {
+		case <-ticker:
+			c.removeStaleWorkers()
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *CoordinatorServer) removeStaleWorkers() {
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+
+	for workerID, worker := range c.WorkerPool {
+		if worker.heartbeatMisses > defaultMaxMisses {
+			worker.conn.Close()
+			delete(c.WorkerPool, workerID)
+			c.regenWorkerKeys()
+		} else {
+			worker.heartbeatMisses++
+		}
+	}
 }
 
 func (c *CoordinatorServer) startGRPCServer() error {
@@ -112,9 +197,6 @@ func (c *CoordinatorServer) startGRPCServer() error {
 	return nil
 }
 
-func (c *CoordinatorServer) scanDatabase() {
-}
-
 func (c *CoordinatorServer) awaitShutdown() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -133,7 +215,7 @@ func (c *CoordinatorServer) Stop() error {
 	for id, worker := range c.WorkerPool {
 		if worker.conn != nil {
 			if err := worker.conn.Close(); err != nil {
-				log.Printf("failed to close connection for worker %d: %v", id, err)
+				log.Printf("failed to close connection for worker %s: %v", id, err)
 			}
 		}
 	}
@@ -173,8 +255,8 @@ func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.Update
 		value = req.GetStartedAt()
 	}
 
-	timestamp:= time.Unix(value, 0)
-	sqlStatement := fmt.Sprintf("update tasks set %s=%s where id=%s", field, timestamp)
+	timestamp := time.Unix(value, 0)
+	sqlStatement := fmt.Sprintf("update tasks set %s=$1 where id=$2", field)
 	_, err := c.dbPool.Exec(ctx, sqlStatement, timestamp, taskID)
 	if err != nil {
 		log.Printf("Could not update task status for task %s: %+v", taskID, err)
