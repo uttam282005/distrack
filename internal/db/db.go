@@ -3,7 +3,10 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,3 +35,33 @@ func ConnectToDatabase(ctx context.Context, dbConnectionString string) (*pgxpool
 	return dbPool, nil
 }
 
+func GetDBConnectionString() string {
+	var missingEnvVars []string
+
+	checkEnvVar := func(envVar, envVarName string) {
+		if envVar == "" {
+			missingEnvVars = append(missingEnvVars, envVarName)
+		}
+	}
+
+	dbUser := os.Getenv("POSTGRES_USER")
+	checkEnvVar(dbUser, "POSTGRES_USER")
+
+	dbPassword := os.Getenv("POSTGRES_PASSWORD")
+	checkEnvVar(dbPassword, "POSTGRES_PASSWORD")
+
+	dbName := os.Getenv("POSTGRES_DB")
+	checkEnvVar(dbName, "POSTGRES_DB")
+
+	dbHost := os.Getenv("POSTGRES_HOST")
+	if dbHost == "" {
+		dbHost = "localhost"
+	}
+
+	if len(missingEnvVars) > 0 {
+		log.Fatalf("The following required environment variables are not set: %s",
+			strings.Join(missingEnvVars, ", "))
+	}
+
+	return fmt.Sprintf("postgres://%s:%s@%s:5432/%s", dbUser, dbPassword, dbHost, dbName)
+}

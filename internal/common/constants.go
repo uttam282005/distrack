@@ -1,3 +1,4 @@
+// Package common contains constants
 package common
 
 const (
