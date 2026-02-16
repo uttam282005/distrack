@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uttam282005/distrack/internal/common"
 	"github.com/uttam282005/distrack/internal/db"
@@ -98,7 +100,95 @@ func (c *CoordinatorServer) scanDatabase() {
 	}
 }
 
+func (c *CoordinatorServer) getNextWorker() *WorkerInfo {
+	c.WorkerPoolKeysMutex.Lock()
+	defer c.WorkerPoolKeysMutex.Unlock()
+
+	workerCount := len(c.WorkerPoolKeys)
+	if workerCount == 0 {
+		return nil
+	}
+
+	workerID := c.WorkerPoolKeys[int(c.roundRobinIndex)%workerCount]
+
+	c.WorkerPoolMutex.Lock()
+	worker := c.WorkerPool[workerID]
+	c.WorkerPoolMutex.Unlock()
+
+	c.roundRobinIndex++
+
+	return worker
+}
+
+func (c *CoordinatorServer) submitTaskToWorker(task *pb.TaskRequest) error {
+	worker := c.getNextWorker()
+	if worker == nil {
+		return errors.New("no workers available")
+	}
+
+	_, err := worker.workerServiceClient.SubmitTask(context.Background(), task)
+	return err
+}
+
 func (c *CoordinatorServer) executeAllScheduledTasks() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := c.dbPool.Begin(ctx)
+	if err != nil {
+		log.Printf("Unable to start transaction %v\n", err)
+		return
+	}
+
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			log.Printf("ERROR: %#v", err)
+			log.Printf("Failed to rollback transaction: %v\n", err)
+		}
+	}()
+
+	sql := "SELECT id, command FROM tasks WHERE scheduled_at < (NOW() + INTERVAL '30 seconds') AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED"
+	rows, err := tx.Query(ctx, sql)
+	if err != nil {
+		log.Printf("Error executing query: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var tasks []*pb.TaskRequest
+	for rows.Next() {
+		var id, command string
+		if err := rows.Scan(&id, &command); err != nil {
+			log.Printf("Failed to scan row: %v\n", err)
+			continue
+		}
+
+		tasks = append(tasks, &pb.TaskRequest{
+			TaskId: id,
+			Data:   command,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating rows: %v\n", err)
+		return
+	}
+
+	for _, task := range tasks {
+		if err := c.submitTaskToWorker(task); err != nil {
+			log.Printf("Failed to submit task %+v", task)
+			continue
+		}
+
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = $1`, task.GetTaskId()); err != nil {
+			log.Printf("Failed to update task %s: %v\n", task.GetTaskId(), err)
+			continue
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("Failed to commit transaction: %v\n", err)
+	}
 }
 
 func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartBeatResponse, error) {
