@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	serverPort      = flag.String("worker_port", "", "Port on which the Worker serves requests.")
+	serverPort      = flag.String("worker_port", ":8000", "Port on which the Worker serves requests.")
 	coordinatorPort = flag.String("coordinator", ":8080", "Network address of the Coordinator.")
 )
 

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/pgtype"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uttam282005/distrack/internal/db"
 )
@@ -136,8 +136,8 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Only POST request is allowerd", http.StatusMethodNotAllowed)
+	if r.Method != "GET" {
+		http.Error(w, "Only GET  request is allowerd", http.StatusMethodNotAllowed)
 		return
 	}
 

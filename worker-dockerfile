@@ -23,6 +23,7 @@ RUN go mod download
 # Copy the local package files to the container's workspace.
 COPY internal/ ./internal/
 COPY cmd/worker/main.go .
+COPY proto/ ./proto/
 
 RUN ./proto/build.sh
 

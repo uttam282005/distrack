@@ -255,22 +255,31 @@ func (w *WorkerServer) updateTaskStatus(task *pb.TaskRequest, status pb.TaskStat
 }
 
 func (w *WorkerServer) processTask(task *pb.TaskRequest) error {
-	commandString := task.Data
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
+    ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+    defer cancel()
 
-	file, err := os.Create(fmt.Sprintf("%s_output.txt", w.workerID))
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %v", err)
-	}
-	cmd := exec.CommandContext(ctx, commandString)
-	cmd.Stdout = file
-	cmd.Stderr = file
+    file, err := os.Create(fmt.Sprintf("%s_output.txt", w.workerID))
+    if err != nil {
+        return fmt.Errorf("failed to create output file: %w", err)
+    }
+    defer file.Close()
 
-	_, err = cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to get output")
-	}
+    cmd := exec.CommandContext(ctx, task.GetData())
+    cmd.Stdout = file
+    cmd.Stderr = file
 
-	return nil
+    err = cmd.Run()
+    if err != nil {
+        if ctx.Err() == context.DeadlineExceeded {
+            return fmt.Errorf("task timed out")
+        }
+
+        if exitErr, ok := err.(*exec.ExitError); ok {
+            return fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
+        }
+
+        return fmt.Errorf("failed to execute task: %w", err)
+    }
+
+    return nil
 }

@@ -86,7 +86,7 @@ func (c *CoordinatorServer) Start() error {
 }
 
 func (c *CoordinatorServer) scanDatabase() {
-	ticker := time.NewTicker(scanInterval)
+	ticker := time.NewTicker(scanInterval * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -223,9 +223,7 @@ func (c *CoordinatorServer) regenWorkerKeys() {
 	c.WorkerPoolKeysMutex.Lock()
 	defer c.WorkerPoolKeysMutex.Unlock()
 
-	workerCount := len(c.WorkerPool)
-	c.WorkerPoolKeys = make([]string, workerCount)
-
+	c.WorkerPoolKeys = c.WorkerPoolKeys[:0]
 	for workerID := range c.WorkerPool {
 		c.WorkerPoolKeys = append(c.WorkerPoolKeys, workerID)
 	}
