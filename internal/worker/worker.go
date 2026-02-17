@@ -231,19 +231,6 @@ func (w *WorkerServer) updateTaskStatus(task *pb.TaskRequest, status pb.TaskStat
 		Status: status,
 	}
 
-	now := time.Now().Unix()
-
-	switch status {
-	case pb.TaskStatus_COMPLETED:
-		updateTaskStatusRequest.CompletedAt = now
-
-	case pb.TaskStatus_INPROGRESS:
-		updateTaskStatusRequest.StartedAt = now
-
-	case pb.TaskStatus_FAILED:
-		updateTaskStatusRequest.FailedAt = now
-	}
-
 	// TODO: send with exponential backoff
 	_, err := w.coordinatorServiceClient.UpdateTaskStatus(
 		context.Background(),

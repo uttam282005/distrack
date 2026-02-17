@@ -327,25 +327,21 @@ func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.Update
 	taskID := req.GetTaskId()
 	status := req.GetStatus()
 	var field string
-	var value int64
+	value := time.Now().UTC()
 
 	switch status {
 	case pb.TaskStatus_COMPLETED:
 		field = "completed_at"
-		value = req.GetCompletedAt()
 
 	case pb.TaskStatus_FAILED:
 		field = "failed_at"
-		value = req.GetFailedAt()
 
 	case pb.TaskStatus_INPROGRESS:
 		field = "started_at"
-		value = req.GetStartedAt()
 	}
 
-	timestamp := time.Unix(value, 0)
 	sqlStatement := fmt.Sprintf("update tasks set %s=$1 where id=$2", field)
-	_, err := c.dbPool.Exec(ctx, sqlStatement, timestamp, taskID)
+	_, err := c.dbPool.Exec(ctx, sqlStatement, value, taskID)
 	if err != nil {
 		log.Printf("Could not update task status for task %s: %+v", taskID, err)
 		return nil, err
