@@ -33,11 +33,8 @@ service CoordinatorService {
 }
 
 message UpdateStatusRequest {
-  TaskStatus status = 1;
-  string task_id = 2;
-  int64 started_at = 3;
-  int64 completed_at = 4;
-  int64 failed_at = 5;
+  string task_id = 1;
+  TaskStatus status = 2;
 }
 
 message UpdateStatusResponse {

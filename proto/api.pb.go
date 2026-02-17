@@ -187,11 +187,8 @@ func (x *TaskResponse) GetSuccess() bool {
 
 type UpdateStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        TaskStatus             `protobuf:"varint,1,opt,name=status,proto3,enum=proto.TaskStatus" json:"status,omitempty"`
-	TaskId        string                 `protobuf:"bytes,2,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	StartedAt     int64                  `protobuf:"varint,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	CompletedAt   int64                  `protobuf:"varint,4,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
-	FailedAt      int64                  `protobuf:"varint,5,opt,name=failed_at,json=failedAt,proto3" json:"failed_at,omitempty"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Status        TaskStatus             `protobuf:"varint,2,opt,name=status,proto3,enum=proto.TaskStatus" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -226,13 +223,6 @@ func (*UpdateStatusRequest) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *UpdateStatusRequest) GetStatus() TaskStatus {
-	if x != nil {
-		return x.Status
-	}
-	return TaskStatus_QUEUED
-}
-
 func (x *UpdateStatusRequest) GetTaskId() string {
 	if x != nil {
 		return x.TaskId
@@ -240,25 +230,11 @@ func (x *UpdateStatusRequest) GetTaskId() string {
 	return ""
 }
 
-func (x *UpdateStatusRequest) GetStartedAt() int64 {
+func (x *UpdateStatusRequest) GetStatus() TaskStatus {
 	if x != nil {
-		return x.StartedAt
+		return x.Status
 	}
-	return 0
-}
-
-func (x *UpdateStatusRequest) GetCompletedAt() int64 {
-	if x != nil {
-		return x.CompletedAt
-	}
-	return 0
-}
-
-func (x *UpdateStatusRequest) GetFailedAt() int64 {
-	if x != nil {
-		return x.FailedAt
-	}
-	return 0
+	return TaskStatus_QUEUED
 }
 
 type UpdateStatusResponse struct {
@@ -412,14 +388,10 @@ const file_api_proto_rawDesc = "" +
 	"\fTaskResponse\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x18\n" +
-	"\asuccess\x18\x03 \x01(\bR\asuccess\"\xb8\x01\n" +
-	"\x13UpdateStatusRequest\x12)\n" +
-	"\x06status\x18\x01 \x01(\x0e2\x11.proto.TaskStatusR\x06status\x12\x17\n" +
-	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x1d\n" +
-	"\n" +
-	"started_at\x18\x03 \x01(\x03R\tstartedAt\x12!\n" +
-	"\fcompleted_at\x18\x04 \x01(\x03R\vcompletedAt\x12\x1b\n" +
-	"\tfailed_at\x18\x05 \x01(\x03R\bfailedAt\"0\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\"Y\n" +
+	"\x13UpdateStatusRequest\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12)\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x11.proto.TaskStatusR\x06status\"0\n" +
 	"\x14UpdateStatusResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"H\n" +
 	"\x10HeartbeatRequest\x12\x1a\n" +
