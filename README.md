@@ -1,2 +1,2 @@
 # distrack
-a distributed task scheduler
+a small distributed task scheduler

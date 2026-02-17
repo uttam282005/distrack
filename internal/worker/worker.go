@@ -241,7 +241,7 @@ func (w *WorkerServer) updateTaskStatus(task *pb.TaskRequest, status pb.TaskStat
 	}
 }
 
-func (w *WorkerServer) processTask(task *pb.TaskRequest) (string, error) {
+func (w *WorkerServer) processTask(task *pb.TaskRequest) error {
     ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
     defer cancel()
 
@@ -252,7 +252,7 @@ func (w *WorkerServer) processTask(task *pb.TaskRequest) (string, error) {
 
     file, err := os.Create(outputPath)
     if err != nil {
-        return "", fmt.Errorf("failed to create output file: %w", err)
+        return fmt.Errorf("failed to create output file: %w", err)
     }
     defer file.Close()
 
@@ -263,16 +263,15 @@ func (w *WorkerServer) processTask(task *pb.TaskRequest) (string, error) {
     err = cmd.Run()
 
     if ctx.Err() == context.DeadlineExceeded {
-        return outputPath, fmt.Errorf("task timed out")
+        return fmt.Errorf("task timed out")
     }
 
     if err != nil {
         if exitErr, ok := err.(*exec.ExitError); ok {
-            return outputPath,
-                fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
+            return fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
         }
-        return outputPath, fmt.Errorf("execution error: %w", err)
+        return fmt.Errorf("execution error: %w", err)
     }
 
-    return outputPath, nil
+    return nil
 }
