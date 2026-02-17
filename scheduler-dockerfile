@@ -1,10 +1,9 @@
 # Use an official Go runtime as a parent image
-FROM golang:1.21
+FROM golang:1.23
 
 # Install Protobuf compiler and Go-related packages
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
-    golang-go \
     git
 
 # Install the protoc-gen-go and protoc-gen-go-grpc plugins
