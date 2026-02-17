@@ -49,3 +49,5 @@ services:
       WORKER_ADDRESS: worker
     depends_on:
       - coordinator
+    volumes:
+      - ./worker_output:/app/output

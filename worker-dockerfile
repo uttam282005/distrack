@@ -25,6 +25,7 @@ COPY cmd/worker/main.go .
 COPY proto/ ./proto/
 
 RUN ./proto/build.sh
+RUN mkdir -p /app/output
 
 # Build the worker application
 RUN go build -o worker main.go
