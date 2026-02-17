@@ -36,7 +36,7 @@ where n is the number of workers
 
 # Services: postgres, scheduler (:8081), coordinator (:8080), worker (:8000, internal)
 
-## API usage (Scheduler)
+# API usage (Scheduler)
 Schedule a task (execute a shell command after N seconds):
 ```/dev/null/shell#L1-4
 curl -X POST http://localhost:8081/schedule \
