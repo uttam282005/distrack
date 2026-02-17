@@ -48,7 +48,7 @@ func NewServer(port string, coordinator string) *WorkerServer {
 		workerID:           uuid.New(),
 		serverPort:         port,
 		coordinatorAddress: coordinator,
-		heartbeatInterval:  time.Duration(DefaultHeartBeat) * time.Second,
+		heartbeatInterval:  time.Duration(DefaultHeartBeat * time.Second),
 		taskQueue:          make(chan *pb.TaskRequest, 100),
 		ctx:                ctx,
 		cancel:             cancel,
@@ -170,7 +170,7 @@ func (w *WorkerServer) periodicHeartbeat() {
 	w.wg.Add(1)
 	defer w.wg.Done()
 
-	ticker := time.NewTicker(w.heartbeatInterval * time.Second)
+	ticker := time.NewTicker(w.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {

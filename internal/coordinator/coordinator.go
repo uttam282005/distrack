@@ -177,6 +177,7 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 	for _, task := range tasks {
 		if err := c.submitTaskToWorker(task); err != nil {
 			log.Printf("Failed to submit task %+v", task)
+			log.Printf("Task submission failed: %v", err)
 			continue
 		}
 
