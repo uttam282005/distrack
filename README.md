@@ -53,8 +53,38 @@ curl "http://localhost:8081/status?task_id=<TASK_ID>"
 - Task outputs from workers are written to `worker_output/` on the host (mounted into the worker container at `/app/output`).
 - Task lifecycle fields: scheduled_at, picked_at, started_at, completed_at, failed_at.
 
+## Benchmarking
+Run the benchmark script to test system performance:
+```shell
+./benchmark.sh
+```
+
+The benchmark suite tests:
+1. **Task Scheduling Throughput**: How many tasks can be scheduled per second
+2. **Task Execution Latency**: End-to-end time from scheduling to completion
+3. **System Load Test**: Sustained load over 30 seconds
+4. **Worker Scalability**: How the system scales with multiple workers
+
+Configure the benchmark with environment variables:
+```shell
+NUM_TASKS=500 CONCURRENCY=20 WORKER_COUNT=5 ./benchmark.sh
+```
+
+Available options:
+- `SCHEDULER_URL`: Scheduler endpoint (default: http://localhost:8081)
+- `NUM_TASKS`: Number of tasks to schedule (default: 100)
+- `DELAY_SECONDS`: Task delay in seconds (default: 1)
+- `CONCURRENCY`: Concurrent requests (default: 10)
+- `WORKER_COUNT`: Number of workers (default: 3)
+
+Test with different worker counts:
+```shell
+docker compose up --build --scale worker=10
+WORKER_COUNT=10 ./benchmark.sh
+```
+
 ## Notes and caveats
-- The worker’s `coordinator` flag defaults to `:8080` (port-only). In containers, rely on Compose to pass a resolvable address. With Compose, the worker connects to `coordinator:8080`.
+- The worker's `coordinator` flag defaults to `:8080` (port-only). In containers, rely on Compose to pass a resolvable address. With Compose, the worker connects to `coordinator:8080`.
 - If you run services outside Compose, pass explicit hostnames:
   - Worker: `--worker_port=:8000 --coordinator=localhost:8080`
   - Coordinator: `--coordinator_port=:8080`

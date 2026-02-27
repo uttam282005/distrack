@@ -133,13 +133,13 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 		StartedAt:   nil,
 	}
 
-	jsonResponse, err := json.Marshal(commandResponse)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-
+	// jsonResponse, err := json.Marshal(commandResponse)
+	// if err != nil {
+	// 	http.Error(w, err.Error(), http.StatusInternalServerError)
+	// }
+	//
   w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jsonResponse)
+	json.NewEncoder(w).Encode(commandResponse)
 }
 
 func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
