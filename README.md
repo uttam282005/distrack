@@ -62,3 +62,18 @@ curl "http://localhost:8081/status?task_id=<TASK_ID>"
 - Multiple workers should each have unique, reachable addresses. If you set the same `WORKER_ADDRESS` for all workers, the Coordinator will treat them as distinct IDs but connect them all to the same endpoint, losing per-instance addressing.
 
 >> NOTE: This is not for production use. It is intended for development and testing purposes only.
+
+
+## Benchmark script
+Use `scripts/benchmark.sh` to run a basic end-to-end benchmark against the Scheduler API.
+It submits tasks, polls status until completion/failure, and reports throughput + latency summary.
+
+```bash
+./scripts/benchmark.sh -u http://localhost:8081 -n 100 -d 0 -c "echo hello"
+```
+
+See all options:
+
+```bash
+./scripts/benchmark.sh -h
+```
