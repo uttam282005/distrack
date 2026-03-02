@@ -126,7 +126,10 @@ func (c *CoordinatorServer) submitTaskToWorker(task *pb.TaskRequest) error {
 		return errors.New("no workers available")
 	}
 
-	_, err := worker.workerServiceClient.SubmitTask(context.Background(), task)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := worker.workerServiceClient.SubmitTask(ctx, task)
 	return err
 }
 
