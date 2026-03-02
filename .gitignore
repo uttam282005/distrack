@@ -31,3 +31,6 @@ data/
 # temp fies for minor local testing
 temp
 temp.go
+
+# worker output direcotory
+worker_output

@@ -38,6 +38,7 @@ where n is the number of workers
 
 # API usage (Scheduler)
 Schedule a task (execute a shell command after N seconds):
+
 ```/dev/null/shell#L1-4
 curl -X POST http://localhost:8081/schedule \
   -H "Content-Type: application/json" \
@@ -45,6 +46,7 @@ curl -X POST http://localhost:8081/schedule \
 ```
 
 ## Check task status:
+
 ```/dev/null/shell#L1-1
 curl "http://localhost:8081/status?task_id=<TASK_ID>"
 ```
