@@ -29,13 +29,15 @@ Compose defines service names with internal DNS:
 - Postgres is reachable at `postgres:5432`.
 - Worker reports itself as `worker:8000`.
 
-Start the stack:
+## Start the stack:
 
+Services: postgres, scheduler (:8081), coordinator (:8080), worker (:8000, internal)
+
+start n workers
 ```/dev/null/shell#L1-3
 docker compose up --build --scale worker=n
 ```
 
-# Services: postgres, scheduler (:8081), coordinator (:8080), worker (:8000, internal)
 
 # API usage (Scheduler)
 Schedule a task (execute a shell command after N seconds):
