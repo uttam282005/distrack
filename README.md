@@ -30,9 +30,10 @@ Compose defines service names with internal DNS:
 - Worker reports itself as `worker:8000`.
 
 Start the stack:
+
 ```/dev/null/shell#L1-3
 docker compose up --build --scale worker=n
-where n is the number of workers
+```
 
 # Services: postgres, scheduler (:8081), coordinator (:8080), worker (:8000, internal)
 
