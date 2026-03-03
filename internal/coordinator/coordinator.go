@@ -179,8 +179,7 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 
 	for _, task := range tasks {
 		if err := c.submitTaskToWorker(task); err != nil {
-			log.Printf("Failed to submit task %+v", task)
-			log.Printf("Task submission failed: %v", err)
+			log.Printf("Failed to submit task %+v\n err: %v\n", task, err)
 			continue
 		}
 
@@ -282,7 +281,7 @@ func (c *CoordinatorServer) startGRPCServer() error {
 
 	go func() {
 		if err := c.grpcServer.Serve(c.listener); err != nil {
-			log.Fatalf("gRPC server failed: %v", err)
+			log.Fatalf("gRPC server failed: %v\n", err)
 		}
 	}()
 

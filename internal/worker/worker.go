@@ -16,13 +16,17 @@ import (
 	"github.com/google/uuid"
 	pb "github.com/uttam282005/distrack/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 const (
 	DefaultHeartBeat      = 3
 	defaultWorkerPoolSize = 5
 )
+
+var ErrWorkerQueueFull = status.Error(codes.ResourceExhausted, "worker queue full")
 
 type WorkerServer struct {
 	pb.UnimplementedWorkerServiceServer
@@ -196,13 +200,17 @@ func (w *WorkerServer) SetUpWorkerPool(workerPoolSize int) {
 func (w *WorkerServer) SubmitTask(ctx context.Context, task *pb.TaskRequest) (*pb.TaskResponse, error) {
 	log.Printf("Received task: %+v", task)
 
-	w.taskQueue <- task
+	select {
+	case w.taskQueue <- task:
+		return &pb.TaskResponse{
+			Message: "Task was submitted",
+			Success: true,
+			TaskId:  task.TaskId,
+		}, nil
 
-	return &pb.TaskResponse{
-		Message: "Task was submitted",
-		Success: true,
-		TaskId:  task.TaskId,
-	}, nil
+	default:
+		return nil, ErrWorkerQueueFull
+	}
 }
 
 func (w *WorkerServer) worker() {
@@ -242,36 +250,36 @@ func (w *WorkerServer) updateTaskStatus(task *pb.TaskRequest, status pb.TaskStat
 }
 
 func (w *WorkerServer) processTask(task *pb.TaskRequest) error {
-    ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-    defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
 
-    outputPath := fmt.Sprintf("/app/output/%s_%s.txt",
-        w.workerID,
-        task.GetTaskId(),
-    )
+	outputPath := fmt.Sprintf("/app/output/%s_%s.txt",
+		w.workerID,
+		task.GetTaskId(),
+	)
 
-    file, err := os.Create(outputPath)
-    if err != nil {
-        return fmt.Errorf("failed to create output file: %w", err)
-    }
-    defer file.Close()
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
 
-    cmd := exec.CommandContext(ctx, "bash", "-c", task.GetData())
-    cmd.Stdout = file
-    cmd.Stderr = file
+	cmd := exec.CommandContext(ctx, "bash", "-c", task.GetData())
+	cmd.Stdout = file
+	cmd.Stderr = file
 
-    err = cmd.Run()
+	err = cmd.Run()
 
-    if ctx.Err() == context.DeadlineExceeded {
-        return fmt.Errorf("task timed out")
-    }
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("task timed out")
+	}
 
-    if err != nil {
-        if exitErr, ok := err.(*exec.ExitError); ok {
-            return fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
-        }
-        return fmt.Errorf("execution error: %w", err)
-    }
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
+		}
+		return fmt.Errorf("execution error: %w", err)
+	}
 
-    return nil
+	return nil
 }
