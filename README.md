@@ -1,4 +1,4 @@
-/![Request flow](/assets/request-flow.png) 
+![Request flow](/assets/request-flow.png) 
 
 # distrack
 A small distributed task scheduler composed of three services:
