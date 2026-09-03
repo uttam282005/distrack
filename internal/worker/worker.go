@@ -10,8 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
-	"syscall"
-	"time"
+	"syscall" "time"
 
 	"github.com/google/uuid"
 	pb "github.com/uttam282005/distrack/proto"
@@ -23,7 +22,7 @@ import (
 
 const (
 	DefaultHeartBeat      = 3
-	defaultWorkerPoolSize = 5
+	defaultWorkerPoolSize = 10
 )
 
 var ErrWorkerQueueFull = status.Error(codes.ResourceExhausted, "worker queue full")
