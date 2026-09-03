@@ -1,4 +1,5 @@
-/![Request flow](/home/uttam/dev/distrack/assets/request-flow.png) 
+/![Request flow](/assets/request-flow.png) 
+
 # distrack
 A small distributed task scheduler composed of three services:
 - Coordinator (gRPC, default :8080): tracks workers, assigns tasks, updates task status.
