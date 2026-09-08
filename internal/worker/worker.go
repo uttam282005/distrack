@@ -10,7 +10,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
-	"syscall" "time"
+	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	pb "github.com/uttam282005/distrack/proto"

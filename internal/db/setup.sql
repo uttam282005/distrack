@@ -7,7 +7,8 @@ CREATE TABLE tasks (
     picked_at TIMESTAMPTZ,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
-    failed_at TIMESTAMPTZ
+    failed_at TIMESTAMPTZ,
+    traceparent TEXT
 );
 
 CREATE INDEX idx_tasks_scheduled_at ON tasks (scheduled_at);

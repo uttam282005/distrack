@@ -32,6 +32,12 @@ func ConnectToDatabase(ctx context.Context, dbConnectionString string) (*pgxpool
 	}
 
 	log.Printf("Connected to the database.")
+
+	// Ensure traceparent column exists for distributed tracing context reification
+	if _, err := dbPool.Exec(ctx, `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS traceparent TEXT;`); err != nil {
+		log.Printf("Warning: failed to ensure traceparent column: %v", err)
+	}
+
 	return dbPool, nil
 }
 
