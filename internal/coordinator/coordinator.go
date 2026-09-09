@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -17,7 +17,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uttam282005/distrack/internal/common"
 	"github.com/uttam282005/distrack/internal/db"
+	"github.com/uttam282005/distrack/internal/telemetry"
 	pb "github.com/uttam282005/distrack/proto"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -45,6 +51,8 @@ type CoordinatorServer struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	wg                  sync.WaitGroup
+	logger              *slog.Logger
+	tracer              trace.Tracer
 }
 
 type WorkerInfo struct {
@@ -54,7 +62,10 @@ type WorkerInfo struct {
 	workerServiceClient pb.WorkerServiceClient
 }
 
-func NewServer(port string, dbConnectionString string) *CoordinatorServer {
+func NewServer(port string, dbConnectionString string, logger *slog.Logger) *CoordinatorServer {
+	if logger == nil {
+		logger = telemetry.InitLogger("distrack-coordinator")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &CoordinatorServer{
 		WorkerPool:         make(map[string]*WorkerInfo),
@@ -64,6 +75,8 @@ func NewServer(port string, dbConnectionString string) *CoordinatorServer {
 		serverPort:         port,
 		ctx:                ctx,
 		cancel:             cancel,
+		logger:             logger,
+		tracer:             otel.Tracer("distrack-coordinator"),
 	}
 }
 
@@ -77,6 +90,7 @@ func (c *CoordinatorServer) Start() error {
 
 	c.dbPool, err = db.ConnectToDatabase(c.ctx, c.dbConnectionString)
 	if err != nil {
+		c.logger.Error("Database connection failed", "error", err.Error())
 		return err
 	}
 
@@ -94,7 +108,7 @@ func (c *CoordinatorServer) scanDatabase() {
 		case <-ticker.C:
 			go c.executeAllScheduledTasks()
 		case <-c.ctx.Done():
-			log.Println("Shutting down database scanner.")
+			c.logger.Info("Shutting down database scanner.")
 			return
 		}
 	}
@@ -120,17 +134,22 @@ func (c *CoordinatorServer) getNextWorker() *WorkerInfo {
 	return worker
 }
 
-func (c *CoordinatorServer) submitTaskToWorker(task *pb.TaskRequest) error {
+func (c *CoordinatorServer) submitTaskToWorker(ctx context.Context, task *pb.TaskRequest) error {
 	worker := c.getNextWorker()
 	if worker == nil {
 		return errors.New("no workers available")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err := worker.workerServiceClient.SubmitTask(ctx, task)
+	_, err := worker.workerServiceClient.SubmitTask(subCtx, task)
 	return err
+}
+
+type scheduledTaskItem struct {
+	task        *pb.TaskRequest
+	traceparent string
 }
 
 func (c *CoordinatorServer) executeAllScheduledTasks() {
@@ -139,58 +158,84 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 
 	tx, err := c.dbPool.Begin(ctx)
 	if err != nil {
-		log.Printf("Unable to start transaction %v\n", err)
+		c.logger.ErrorContext(ctx, "Unable to start transaction for task dispatch", "error", err.Error())
 		return
 	}
 
 	defer func() {
 		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-			log.Printf("ERROR: %#v", err)
-			log.Printf("Failed to rollback transaction: %v\n", err)
+			c.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", err.Error())
 		}
 	}()
 
-	sql := "SELECT id, command FROM tasks WHERE scheduled_at < (NOW() + INTERVAL '30 seconds') AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED"
+	sql := "SELECT id, command, COALESCE(traceparent, '') FROM tasks WHERE scheduled_at < (NOW() + INTERVAL '30 seconds') AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED"
 	rows, err := tx.Query(ctx, sql)
 	if err != nil {
-		log.Printf("Error executing query: %v\n", err)
+		c.logger.ErrorContext(ctx, "Error executing query for scheduled tasks", "error", err.Error())
 		return
 	}
 	defer rows.Close()
 
-	var tasks []*pb.TaskRequest
+	var items []scheduledTaskItem
 	for rows.Next() {
-		var id, command string
-		if err := rows.Scan(&id, &command); err != nil {
-			log.Printf("Failed to scan row: %v\n", err)
+		var id, command, traceparent string
+		if err := rows.Scan(&id, &command, &traceparent); err != nil {
+			c.logger.WarnContext(ctx, "Failed to scan task row", "error", err.Error())
 			continue
 		}
 
-		tasks = append(tasks, &pb.TaskRequest{
-			TaskId: id,
-			Data:   command,
+		items = append(items, scheduledTaskItem{
+			task: &pb.TaskRequest{
+				TaskId: id,
+				Data:   command,
+			},
+			traceparent: traceparent,
 		})
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("Error iterating rows: %v\n", err)
+		c.logger.ErrorContext(ctx, "Error iterating task rows", "error", err.Error())
 		return
 	}
 
-	for _, task := range tasks {
-		if err := c.submitTaskToWorker(task); err != nil {
-			log.Printf("Failed to submit task %+v\n err: %v\n", task, err)
+	for _, item := range items {
+		// Resurrect parent trace context from PostgreSQL!
+		taskCtx := telemetry.ExtractTraceparent(ctx, item.traceparent)
+		taskCtx, span := c.tracer.Start(taskCtx, "coordinator.dispatch_task",
+			trace.WithAttributes(
+				attribute.String("task.id", item.task.GetTaskId()),
+				attribute.String("task.command", item.task.GetData()),
+			),
+		)
+
+		if err := c.submitTaskToWorker(taskCtx, item.task); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			c.logger.ErrorContext(taskCtx, "Failed to submit task to worker",
+				"task_id", item.task.GetTaskId(),
+				"error", err.Error(),
+			)
 			continue
 		}
 
-		if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = $1`, task.GetTaskId()); err != nil {
-			log.Printf("Failed to update task %s: %v\n", task.GetTaskId(), err)
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = $1`, item.task.GetTaskId()); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			c.logger.ErrorContext(taskCtx, "Failed to update task picked_at",
+				"task_id", item.task.GetTaskId(),
+				"error", err.Error(),
+			)
 			continue
 		}
+
+		span.End()
+		c.logger.InfoContext(taskCtx, "Dispatched task to worker", "task_id", item.task.GetTaskId())
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
+		c.logger.ErrorContext(ctx, "Failed to commit dispatch transaction", "error", err.Error())
 	}
 }
 
@@ -202,9 +247,13 @@ func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.Heartbeat
 	if worker, ok := c.WorkerPool[workerID]; ok {
 		worker.heartbeatMisses = 0
 	} else {
-		conn, err := grpc.NewClient(req.GetAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(
+			req.GetAddress(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		)
 		if err != nil {
-			log.Printf("failed to connect to the worker: %s\n", workerID)
+			c.logger.Error("Failed to connect to worker", "worker_id", workerID, "address", req.GetAddress(), "error", err.Error())
 		}
 		worker := &WorkerInfo{
 			address:             req.GetAddress(),
@@ -215,6 +264,7 @@ func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.Heartbeat
 
 		c.WorkerPool[workerID] = worker
 		c.regenWorkerKeys()
+		c.logger.Info("Registered new worker in pool", "worker_id", workerID, "address", req.GetAddress())
 	}
 
 	return &pb.HeartBeatResponse{
@@ -233,29 +283,30 @@ func (c *CoordinatorServer) regenWorkerKeys() {
 }
 
 func (c *CoordinatorServer) manageWorkerPool() {
-	ticker := time.Tick(scanInterval * time.Second)
+	ticker := time.NewTicker(c.heartbeatInterval * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ticker:
-			c.removeStaleWorkers()
+		case <-ticker.C:
+			c.WorkerPoolMutex.Lock()
+			for id, worker := range c.WorkerPool {
+				worker.heartbeatMisses++
+				if worker.heartbeatMisses >= c.maxHeartbeatMisses {
+					if worker.conn != nil {
+						if err := worker.conn.Close(); err != nil {
+							c.logger.Warn("Failed to close worker connection", "worker_id", id, "error", err.Error())
+						}
+					}
+					delete(c.WorkerPool, id)
+					c.regenWorkerKeys()
+					c.logger.Warn("Removed dead worker from pool", "worker_id", id)
+				}
+			}
+			c.WorkerPoolMutex.Unlock()
 		case <-c.ctx.Done():
+			c.logger.Info("Shutting down worker pool manager")
 			return
-		}
-	}
-}
-
-func (c *CoordinatorServer) removeStaleWorkers() {
-	c.WorkerPoolMutex.Lock()
-	defer c.WorkerPoolMutex.Unlock()
-
-	for workerID, worker := range c.WorkerPool {
-		if worker.heartbeatMisses > defaultMaxMisses {
-			worker.conn.Close()
-			delete(c.WorkerPool, workerID)
-			c.regenWorkerKeys()
-		} else {
-			worker.heartbeatMisses++
 		}
 	}
 }
@@ -264,9 +315,8 @@ func (c *CoordinatorServer) startGRPCServer() error {
 	var err error
 
 	if c.serverPort == "" {
-		// Find a free port using a temporary socket
-		c.listener, err = net.Listen("tcp", ":0")                                // Bind to any available port
-		c.serverPort = fmt.Sprintf(":%d", c.listener.Addr().(*net.TCPAddr).Port) // Get the assigned port
+		c.listener, err = net.Listen("tcp", ":0")
+		c.serverPort = fmt.Sprintf(":%d", c.listener.Addr().(*net.TCPAddr).Port)
 	} else {
 		c.listener, err = net.Listen("tcp", c.serverPort)
 	}
@@ -275,13 +325,15 @@ func (c *CoordinatorServer) startGRPCServer() error {
 		return fmt.Errorf("failed to listen on %s: %w", c.serverPort, err)
 	}
 
-	log.Printf("Starting worker server on %s\n", c.serverPort)
-	c.grpcServer = grpc.NewServer()
+	c.logger.Info("Starting coordinator gRPC server", "port", c.serverPort)
+	c.grpcServer = grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+	)
 	pb.RegisterCoordinatorServiceServer(c.grpcServer, c)
 
 	go func() {
 		if err := c.grpcServer.Serve(c.listener); err != nil {
-			log.Fatalf("gRPC server failed: %v\n", err)
+			c.logger.Error("gRPC server failed", "error", err.Error())
 		}
 	}()
 
@@ -306,7 +358,7 @@ func (c *CoordinatorServer) Stop() error {
 	for id, worker := range c.WorkerPool {
 		if worker.conn != nil {
 			if err := worker.conn.Close(); err != nil {
-				log.Printf("failed to close connection for worker %s: %v", id, err)
+				c.logger.Warn("Failed to close worker connection during shutdown", "worker_id", id, "error", err.Error())
 			}
 		}
 	}
@@ -321,24 +373,34 @@ func (c *CoordinatorServer) Stop() error {
 		}
 	}
 
-	c.dbPool.Close()
+	if c.dbPool != nil {
+		c.dbPool.Close()
+	}
 
+	c.logger.Info("Coordinator server stopped")
 	return nil
 }
 
 func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.UpdateStatusRequest) (*pb.UpdateStatusResponse, error) {
 	taskID := req.GetTaskId()
 	status := req.GetStatus()
+
+	ctx, span := c.tracer.Start(ctx, "coordinator.update_task_status",
+		trace.WithAttributes(
+			attribute.String("task.id", taskID),
+			attribute.String("task.status", status.String()),
+		),
+	)
+	defer span.End()
+
 	var field string
 	value := time.Now().UTC()
 
 	switch status {
 	case pb.TaskStatus_COMPLETED:
 		field = "completed_at"
-
 	case pb.TaskStatus_FAILED:
 		field = "failed_at"
-
 	case pb.TaskStatus_INPROGRESS:
 		field = "started_at"
 	}
@@ -346,9 +408,20 @@ func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.Update
 	sqlStatement := fmt.Sprintf("update tasks set %s=$1 where id=$2", field)
 	_, err := c.dbPool.Exec(ctx, sqlStatement, value, taskID)
 	if err != nil {
-		log.Printf("Could not update task status for task %s: %+v", taskID, err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		c.logger.ErrorContext(ctx, "Could not update task status in database",
+			"task_id", taskID,
+			"status", status.String(),
+			"error", err.Error(),
+		)
 		return nil, err
 	}
+
+	c.logger.InfoContext(ctx, "Task status updated in database",
+		"task_id", taskID,
+		"status", status.String(),
+	)
 
 	return &pb.UpdateStatusResponse{Success: true}, nil
 }

@@ -4,7 +4,7 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -14,9 +14,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uttam282005/distrack/internal/telemetry"
 	pb "github.com/uttam282005/distrack/proto"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
+	grpccodes "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -26,7 +32,12 @@ const (
 	defaultWorkerPoolSize = 10
 )
 
-var ErrWorkerQueueFull = status.Error(codes.ResourceExhausted, "worker queue full")
+var ErrWorkerQueueFull = status.Error(grpccodes.ResourceExhausted, "worker queue full")
+
+type queuedTaskItem struct {
+	task        *pb.TaskRequest
+	traceparent string
+}
 
 type WorkerServer struct {
 	pb.UnimplementedWorkerServiceServer
@@ -37,38 +48,47 @@ type WorkerServer struct {
 	cooridnatorServiceConn   *grpc.ClientConn
 	heartbeatInterval        time.Duration
 	workerID                 uuid.UUID
-	taskQueue                chan *pb.TaskRequest
+	taskQueue                chan *queuedTaskItem
 	address                  string
 	wg                       sync.WaitGroup
 	ctx                      context.Context
 	cancel                   context.CancelFunc
 	listener                 net.Listener
 	grpcServer               *grpc.Server
+	logger                   *slog.Logger
+	tracer                   trace.Tracer
 }
 
-func NewServer(port string, coordinator string) *WorkerServer {
+func NewServer(port string, coordinator string, logger *slog.Logger) *WorkerServer {
+	if logger == nil {
+		logger = telemetry.InitLogger("distrack-worker")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerServer{
 		workerID:           uuid.New(),
 		serverPort:         port,
 		coordinatorAddress: coordinator,
 		heartbeatInterval:  time.Duration(DefaultHeartBeat * time.Second),
-		taskQueue:          make(chan *pb.TaskRequest, 100),
+		taskQueue:          make(chan *queuedTaskItem, 100),
 		ctx:                ctx,
 		cancel:             cancel,
+		logger:             logger,
+		tracer:             otel.Tracer("distrack-worker"),
 	}
 }
 
 func (w *WorkerServer) sendHeartbeat() error {
 	workerAddress := os.Getenv("WORKER_ADDRESS")
 	if workerAddress == "" {
-		// Fall back to using the listener address if WORKER_ADDRESS is not set
 		workerAddress = w.listener.Addr().String()
 	} else {
 		workerAddress += w.serverPort
 	}
 
-	_, err := w.coordinatorServiceClient.SendHeartbeat(context.Background(), &pb.HeartbeatRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := w.coordinatorServiceClient.SendHeartbeat(ctx, &pb.HeartbeatRequest{
 		WorkerId: fmt.Sprintf("%v", w.workerID),
 		Address:  workerAddress,
 	})
@@ -82,12 +102,14 @@ func (w *WorkerServer) closeGRPCConnection() {
 
 	if w.listener != nil {
 		if err := w.listener.Close(); err != nil {
-			log.Printf("Error while closing the listener: %v", err)
+			w.logger.Warn("Error while closing the listener", "error", err.Error())
 		}
 	}
 
-	if err := w.cooridnatorServiceConn.Close(); err != nil {
-		log.Printf("Error while closing client connection with coordinator: %v", err)
+	if w.cooridnatorServiceConn != nil {
+		if err := w.cooridnatorServiceConn.Close(); err != nil {
+			w.logger.Warn("Error while closing client connection with coordinator", "error", err.Error())
+		}
 	}
 }
 
@@ -96,7 +118,7 @@ func (w *WorkerServer) Start() error {
 
 	err := w.ConnectToCoordinator()
 	if err != nil {
-		return fmt.Errorf("failed to connect to the coordinator")
+		return fmt.Errorf("failed to connect to the coordinator: %w", err)
 	}
 	defer w.closeGRPCConnection()
 
@@ -119,11 +141,9 @@ func (w *WorkerServer) awaitAndStop() error {
 
 func (w *WorkerServer) Stop() error {
 	w.cancel()
-
 	w.wg.Wait()
-
 	w.closeGRPCConnection()
-	log.Println("Worker server stopped")
+	w.logger.Info("Worker server stopped", "worker_id", w.workerID.String())
 	return nil
 }
 
@@ -131,9 +151,8 @@ func (w *WorkerServer) startGRPCServer() error {
 	var err error
 
 	if w.serverPort == "" {
-		// Find a free port using a temporary socket
-		w.listener, err = net.Listen("tcp", ":0")                                // Bind to any available port
-		w.serverPort = fmt.Sprintf(":%d", w.listener.Addr().(*net.TCPAddr).Port) // Get the assigned port
+		w.listener, err = net.Listen("tcp", ":0")
+		w.serverPort = fmt.Sprintf(":%d", w.listener.Addr().(*net.TCPAddr).Port)
 	} else {
 		w.listener, err = net.Listen("tcp", w.serverPort)
 	}
@@ -142,13 +161,15 @@ func (w *WorkerServer) startGRPCServer() error {
 		return fmt.Errorf("failed to listen on %s: %w", w.serverPort, err)
 	}
 
-	log.Printf("Starting worker server on %s\n", w.serverPort)
-	w.grpcServer = grpc.NewServer()
+	w.logger.Info("Starting worker gRPC server", "port", w.serverPort, "worker_id", w.workerID.String())
+	w.grpcServer = grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+	)
 	pb.RegisterWorkerServiceServer(w.grpcServer, w)
 
 	go func() {
 		if err := w.grpcServer.Serve(w.listener); err != nil {
-			log.Fatalf("gRPC server failed: %v", err)
+			w.logger.Error("Worker gRPC server failed", "error", err.Error())
 		}
 	}()
 
@@ -159,6 +180,7 @@ func (w *WorkerServer) ConnectToCoordinator() error {
 	conn, err := grpc.NewClient(
 		w.coordinatorAddress,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to coordinator: %w", err)
@@ -166,6 +188,7 @@ func (w *WorkerServer) ConnectToCoordinator() error {
 
 	w.cooridnatorServiceConn = conn
 	w.coordinatorServiceClient = pb.NewCoordinatorServiceClient(conn)
+	w.logger.Info("Connected to coordinator", "address", w.coordinatorAddress)
 
 	return nil
 }
@@ -181,7 +204,7 @@ func (w *WorkerServer) periodicHeartbeat() {
 		select {
 		case <-ticker.C:
 			if err := w.sendHeartbeat(); err != nil {
-				log.Printf("Failed to send heartbeat: %v", err)
+				w.logger.Warn("Failed to send heartbeat to coordinator", "error", err.Error())
 				return
 			}
 		case <-w.ctx.Done():
@@ -198,17 +221,28 @@ func (w *WorkerServer) SetUpWorkerPool(workerPoolSize int) {
 }
 
 func (w *WorkerServer) SubmitTask(ctx context.Context, task *pb.TaskRequest) (*pb.TaskResponse, error) {
-	log.Printf("Received task: %+v", task)
+	// Extract incoming W3C traceparent injected by coordinator's otelgrpc client handler
+	tp := telemetry.InjectTraceparent(ctx)
+	w.logger.InfoContext(ctx, "Received task submission",
+		"task_id", task.GetTaskId(),
+		"command", task.GetData(),
+	)
+
+	item := &queuedTaskItem{
+		task:        task,
+		traceparent: tp,
+	}
 
 	select {
-	case w.taskQueue <- task:
+	case w.taskQueue <- item:
 		return &pb.TaskResponse{
 			Message: "Task was submitted",
 			Success: true,
-			TaskId:  task.TaskId,
+			TaskId:  task.GetTaskId(),
 		}, nil
 
 	default:
+		w.logger.WarnContext(ctx, "Worker task queue full, rejecting task", "task_id", task.GetTaskId())
 		return nil, ErrWorkerQueueFull
 	}
 }
@@ -218,39 +252,69 @@ func (w *WorkerServer) worker() {
 
 	for {
 		select {
-		case task := <-w.taskQueue:
-			go w.updateTaskStatus(task, pb.TaskStatus_INPROGRESS)
+		case item := <-w.taskQueue:
+			task := item.task
+			taskCtx := telemetry.ExtractTraceparent(context.Background(), item.traceparent)
+			taskCtx, span := w.tracer.Start(taskCtx, "worker.execute_task",
+				trace.WithAttributes(
+					attribute.String("task.id", task.GetTaskId()),
+					attribute.String("task.command", task.GetData()),
+					attribute.String("worker.id", w.workerID.String()),
+				),
+			)
 
-			if err := w.processTask(task); err != nil {
-				w.updateTaskStatus(task, pb.TaskStatus_FAILED)
+			w.updateTaskStatus(taskCtx, task, pb.TaskStatus_INPROGRESS)
+
+			if err := w.processTask(taskCtx, task); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				span.End()
+				w.updateTaskStatus(taskCtx, task, pb.TaskStatus_FAILED)
 				continue
 			}
 
-			w.updateTaskStatus(task, pb.TaskStatus_COMPLETED)
+			span.End()
+			w.updateTaskStatus(taskCtx, task, pb.TaskStatus_COMPLETED)
 		case <-w.ctx.Done():
 			return
 		}
 	}
 }
 
-func (w *WorkerServer) updateTaskStatus(task *pb.TaskRequest, status pb.TaskStatus) {
+func (w *WorkerServer) updateTaskStatus(ctx context.Context, task *pb.TaskRequest, status pb.TaskStatus) {
 	updateTaskStatusRequest := pb.UpdateStatusRequest{
 		TaskId: task.GetTaskId(),
 		Status: status,
 	}
 
-	// TODO: send with exponential backoff
+	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	_, err := w.coordinatorServiceClient.UpdateTaskStatus(
-		context.Background(),
+		subCtx,
 		&updateTaskStatusRequest,
 	)
 	if err != nil {
-		log.Printf("failed to send task update to coordinator")
+		w.logger.ErrorContext(ctx, "Failed to send task status update to coordinator",
+			"task_id", task.GetTaskId(),
+			"status", status.String(),
+			"error", err.Error(),
+		)
 	}
 }
 
-func (w *WorkerServer) processTask(task *pb.TaskRequest) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+//TODO: need isolated execution (maybe docker)
+func (w *WorkerServer) processTask(ctx context.Context, task *pb.TaskRequest) error {
+	ctx, span := w.tracer.Start(ctx, "worker.exec_command",
+		trace.WithAttributes(
+			attribute.String("task.command", task.GetData()),
+			attribute.String("task.id", task.GetTaskId()),
+			attribute.String("worker.id", w.workerID.String()),
+		),
+	)
+	defer span.End()
+
+	execCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
 	outputPath := fmt.Sprintf("/app/output/%s_%s.txt",
@@ -258,28 +322,51 @@ func (w *WorkerServer) processTask(task *pb.TaskRequest) error {
 		task.GetTaskId(),
 	)
 
+	w.logger.InfoContext(ctx, "Starting command subprocess execution",
+		"task_id", task.GetTaskId(),
+		"command", task.GetData(),
+		"output_path", outputPath,
+	)
+
+	// Ensure output directory exists
+	_ = os.MkdirAll("/app/output", 0755)
+
 	file, err := os.Create(outputPath)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		w.logger.ErrorContext(ctx, "Failed to create output file", "error", err.Error(), "path", outputPath)
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer file.Close()
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", task.GetData())
+	cmd := exec.CommandContext(execCtx, "bash", "-c", task.GetData())
 	cmd.Stdout = file
 	cmd.Stderr = file
 
 	err = cmd.Run()
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if execCtx.Err() == context.DeadlineExceeded {
+		span.RecordError(execCtx.Err())
+		span.SetStatus(codes.Error, "task timed out")
+		w.logger.ErrorContext(ctx, "Task execution timed out after 4 seconds", "task_id", task.GetTaskId())
 		return fmt.Errorf("task timed out")
 	}
 
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		if exitErr, ok := err.(*exec.ExitError); ok {
+			w.logger.ErrorContext(ctx, "Task execution failed with non-zero exit code",
+				"task_id", task.GetTaskId(),
+				"exit_code", exitErr.ExitCode(),
+			)
 			return fmt.Errorf("task failed with exit code %d", exitErr.ExitCode())
 		}
+		w.logger.ErrorContext(ctx, "Task execution system error", "task_id", task.GetTaskId(), "error", err.Error())
 		return fmt.Errorf("execution error: %w", err)
 	}
 
+	w.logger.InfoContext(ctx, "Task execution completed successfully", "task_id", task.GetTaskId())
 	return nil
 }
