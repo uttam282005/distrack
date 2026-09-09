@@ -7,8 +7,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
     volumes:
       - ./data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      - distrack-net
 
   scheduler:
     build:
@@ -19,10 +24,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: postgres
+      OTEL_EXPORTER_OTLP_ENDPOINT: distrack-otel-collector:4317
+      OTEL_SERVICE_NAME: distrack-scheduler
     ports:
       - "8081:8081"
     depends_on:
       - postgres
+    networks:
+      - distrack-net
 
   coordinator:
     build:
@@ -33,10 +42,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: postgres
+      OTEL_EXPORTER_OTLP_ENDPOINT: distrack-otel-collector:4317
+      OTEL_SERVICE_NAME: distrack-coordinator
     ports:
       - "8080:8080"
     depends_on:
       - postgres
+    networks:
+      - distrack-net
 
   worker:
     build:
@@ -44,7 +57,15 @@ services:
       dockerfile: worker-dockerfile
     environment:
       WORKER_ADDRESS: worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: distrack-otel-collector:4317
+      OTEL_SERVICE_NAME: distrack-worker
     depends_on:
       - coordinator
     volumes:
       - ./worker_output:/app/output
+    networks:
+      - distrack-net
+
+networks:
+  distrack-net:
+    external: true

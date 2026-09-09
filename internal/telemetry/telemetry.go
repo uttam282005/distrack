@@ -38,8 +38,7 @@ func InitTracer(ctx context.Context, serviceName string) (*sdktrace.TracerProvid
 
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+		resource.NewSchemaless(
 			semconv.ServiceNameKey.String(serviceName),
 			attribute.String("service.version", "1.0.0"),
 		),
