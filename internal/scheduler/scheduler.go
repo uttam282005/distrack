@@ -57,6 +57,7 @@ type SchedulerServer struct {
 	cancel             context.CancelFunc
 	logger             *slog.Logger
 	tracer             trace.Tracer
+	metrics            *telemetry.SchedulerMetrics
 }
 
 func NewServer(port string, dbConnectionString string, logger *slog.Logger) *SchedulerServer {
@@ -64,6 +65,7 @@ func NewServer(port string, dbConnectionString string, logger *slog.Logger) *Sch
 		logger = telemetry.InitLogger("distrack-scheduler")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	metrics, _ := telemetry.NewSchedulerMetrics()
 	return &SchedulerServer{
 		serverPort:         port,
 		dbConnectionString: dbConnectionString,
@@ -71,6 +73,7 @@ func NewServer(port string, dbConnectionString string, logger *slog.Logger) *Sch
 		cancel:             cancel,
 		logger:             logger,
 		tracer:             otel.Tracer("distrack-scheduler"),
+		metrics:            metrics,
 	}
 }
 
@@ -103,15 +106,23 @@ func (s *SchedulerServer) Start() error {
 }
 
 func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	statusCode := http.StatusOK
+	defer func() {
+		s.metrics.RecordHTTPRequest(r.Context(), "schedule", r.Method, statusCode, time.Since(start).Seconds())
+	}()
+
 	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST request is allowed", http.StatusMethodNotAllowed)
+		statusCode = http.StatusMethodNotAllowed
+		http.Error(w, "Only POST request is allowed", statusCode)
 		return
 	}
 
 	var commandRequest SchduleTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&commandRequest); err != nil {
+		statusCode = http.StatusBadRequest
 		s.logger.WarnContext(r.Context(), "Failed to decode schedule request", "error", err.Error())
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), statusCode)
 		return
 	}
 
@@ -121,12 +132,14 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 	)
 
 	if commandRequest.DelaySeconds < 0 {
-		http.Error(w, "delay_seconds must be >= 0", http.StatusBadRequest)
+		statusCode = http.StatusBadRequest
+		http.Error(w, "delay_seconds must be >= 0", statusCode)
 		return
 	}
 
 	if commandRequest.DelaySeconds > 86400 { // 24h max
-		http.Error(w, "delay too large", http.StatusBadRequest)
+		statusCode = http.StatusBadRequest
+		http.Error(w, "delay too large", statusCode)
 		return
 	}
 
@@ -139,11 +152,15 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 
 	taskID, err := s.insertIntoDB(r.Context(), task)
 	if err != nil {
+		statusCode = http.StatusInternalServerError
+		s.metrics.RecordTaskScheduled(r.Context(), "failed")
 		s.logger.ErrorContext(r.Context(), "Failed to submit task", "error", err.Error())
 		http.Error(w, fmt.Sprintf("Failed to submit task. Error: %s", err.Error()),
-			http.StatusInternalServerError)
+			statusCode)
 		return
 	}
+
+	s.metrics.RecordTaskScheduled(r.Context(), "success")
 
 	commandResponse := TaskResponse{
 		TaskID:      taskID,
@@ -161,14 +178,22 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	statusCode := http.StatusOK
+	defer func() {
+		s.metrics.RecordHTTPRequest(r.Context(), "status", r.Method, statusCode, time.Since(start).Seconds())
+	}()
+
 	if r.Method != http.MethodGet {
-		http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
+		statusCode = http.StatusMethodNotAllowed
+		http.Error(w, "Only GET allowed", statusCode)
 		return
 	}
 
 	taskID := r.URL.Query().Get("task_id")
 	if taskID == "" {
-		http.Error(w, "Task ID is required", http.StatusBadRequest)
+		statusCode = http.StatusBadRequest
+		http.Error(w, "Task ID is required", statusCode)
 		return
 	}
 
@@ -197,10 +222,11 @@ func (s *SchedulerServer) handleTaskStatus(w http.ResponseWriter, r *http.Reques
 	)
 
 	if err != nil {
+		statusCode = http.StatusNotFound
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		s.logger.WarnContext(ctx, "Task not found", "task_id", taskID, "error", err.Error())
-		http.Error(w, "Task not found", http.StatusNotFound)
+		http.Error(w, "Task not found", statusCode)
 		return
 	}
 

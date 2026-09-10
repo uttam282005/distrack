@@ -57,6 +57,7 @@ type WorkerServer struct {
 	grpcServer               *grpc.Server
 	logger                   *slog.Logger
 	tracer                   trace.Tracer
+	metrics                  *telemetry.WorkerMetrics
 }
 
 func NewServer(port string, coordinator string, logger *slog.Logger) *WorkerServer {
@@ -64,6 +65,7 @@ func NewServer(port string, coordinator string, logger *slog.Logger) *WorkerServ
 		logger = telemetry.InitLogger("distrack-worker")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	metrics, _ := telemetry.NewWorkerMetrics()
 	return &WorkerServer{
 		workerID:           uuid.New(),
 		serverPort:         port,
@@ -74,6 +76,7 @@ func NewServer(port string, coordinator string, logger *slog.Logger) *WorkerServ
 		cancel:             cancel,
 		logger:             logger,
 		tracer:             otel.Tracer("distrack-worker"),
+		metrics:            metrics,
 	}
 }
 
@@ -85,13 +88,18 @@ func (w *WorkerServer) sendHeartbeat() error {
 		workerAddress += w.serverPort
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	_, err := w.coordinatorServiceClient.SendHeartbeat(ctx, &pb.HeartbeatRequest{
 		WorkerId: fmt.Sprintf("%v", w.workerID),
 		Address:  workerAddress,
 	})
+	if err != nil {
+		w.metrics.RecordHeartbeatSent(ctx, "failed")
+	} else {
+		w.metrics.RecordHeartbeatSent(ctx, "success")
+	}
 	return err
 }
 
@@ -235,6 +243,7 @@ func (w *WorkerServer) SubmitTask(ctx context.Context, task *pb.TaskRequest) (*p
 
 	select {
 	case w.taskQueue <- item:
+		w.metrics.AddQueueDepth(ctx, 1)
 		return &pb.TaskResponse{
 			Message: "Task was submitted",
 			Success: true,
@@ -255,6 +264,7 @@ func (w *WorkerServer) worker() {
 		case item := <-w.taskQueue:
 			task := item.task
 			taskCtx := telemetry.ExtractTraceparent(context.Background(), item.traceparent)
+			w.metrics.AddQueueDepth(taskCtx, -1)
 			taskCtx, span := w.tracer.Start(taskCtx, "worker.execute_task",
 				trace.WithAttributes(
 					attribute.String("task.id", task.GetTaskId()),
@@ -265,7 +275,14 @@ func (w *WorkerServer) worker() {
 
 			w.updateTaskStatus(taskCtx, task, pb.TaskStatus_INPROGRESS)
 
-			if err := w.processTask(taskCtx, task); err != nil {
+			w.metrics.AddActiveTasks(taskCtx, 1)
+			execStart := time.Now()
+			err := w.processTask(taskCtx, task)
+			execDuration := time.Since(execStart).Seconds()
+			w.metrics.AddActiveTasks(taskCtx, -1)
+
+			if err != nil {
+				w.metrics.RecordTaskCompletion(taskCtx, "command", "failed", execDuration)
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
 				span.End()
@@ -273,6 +290,7 @@ func (w *WorkerServer) worker() {
 				continue
 			}
 
+			w.metrics.RecordTaskCompletion(taskCtx, "command", "success", execDuration)
 			span.End()
 			w.updateTaskStatus(taskCtx, task, pb.TaskStatus_COMPLETED)
 		case <-w.ctx.Done():

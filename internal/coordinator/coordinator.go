@@ -53,6 +53,7 @@ type CoordinatorServer struct {
 	wg                  sync.WaitGroup
 	logger              *slog.Logger
 	tracer              trace.Tracer
+	metrics             *telemetry.CoordinatorMetrics
 }
 
 type WorkerInfo struct {
@@ -67,6 +68,7 @@ func NewServer(port string, dbConnectionString string, logger *slog.Logger) *Coo
 		logger = telemetry.InitLogger("distrack-coordinator")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	metrics, _ := telemetry.NewCoordinatorMetrics()
 	return &CoordinatorServer{
 		WorkerPool:         make(map[string]*WorkerInfo),
 		maxHeartbeatMisses: defaultMaxMisses,
@@ -77,6 +79,7 @@ func NewServer(port string, dbConnectionString string, logger *slog.Logger) *Coo
 		cancel:             cancel,
 		logger:             logger,
 		tracer:             otel.Tracer("distrack-coordinator"),
+		metrics:            metrics,
 	}
 }
 
@@ -135,8 +138,10 @@ func (c *CoordinatorServer) getNextWorker() *WorkerInfo {
 }
 
 func (c *CoordinatorServer) submitTaskToWorker(ctx context.Context, task *pb.TaskRequest) error {
+	start := time.Now()
 	worker := c.getNextWorker()
 	if worker == nil {
+		c.metrics.RecordTaskDispatched(ctx, "no_workers", time.Since(start).Seconds())
 		return errors.New("no workers available")
 	}
 
@@ -144,6 +149,11 @@ func (c *CoordinatorServer) submitTaskToWorker(ctx context.Context, task *pb.Tas
 	defer cancel()
 
 	_, err := worker.workerServiceClient.SubmitTask(subCtx, task)
+	if err != nil {
+		c.metrics.RecordTaskDispatched(ctx, "error", time.Since(start).Seconds())
+	} else {
+		c.metrics.RecordTaskDispatched(ctx, "success", time.Since(start).Seconds())
+	}
 	return err
 }
 
@@ -246,6 +256,7 @@ func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.Heartbeat
 	workerID := req.GetWorkerId()
 	if worker, ok := c.WorkerPool[workerID]; ok {
 		worker.heartbeatMisses = 0
+		c.metrics.RecordHeartbeat(ctx, "success")
 	} else {
 		conn, err := grpc.NewClient(
 			req.GetAddress(),
@@ -264,6 +275,8 @@ func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.Heartbeat
 
 		c.WorkerPool[workerID] = worker
 		c.regenWorkerKeys()
+		c.metrics.AddActiveWorkers(ctx, 1)
+		c.metrics.RecordHeartbeat(ctx, "success")
 		c.logger.Info("Registered new worker in pool", "worker_id", workerID, "address", req.GetAddress())
 	}
 
@@ -300,6 +313,8 @@ func (c *CoordinatorServer) manageWorkerPool() {
 					}
 					delete(c.WorkerPool, id)
 					c.regenWorkerKeys()
+					c.metrics.AddActiveWorkers(c.ctx, -1)
+					c.metrics.RecordHeartbeatFailure(c.ctx)
 					c.logger.Warn("Removed dead worker from pool", "worker_id", id)
 				}
 			}
@@ -410,6 +425,7 @@ func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.Update
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+		c.metrics.RecordStatusUpdate(ctx, "FAILED_UPDATE")
 		c.logger.ErrorContext(ctx, "Could not update task status in database",
 			"task_id", taskID,
 			"status", status.String(),
@@ -418,6 +434,7 @@ func (c *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.Update
 		return nil, err
 	}
 
+	c.metrics.RecordStatusUpdate(ctx, status.String())
 	c.logger.InfoContext(ctx, "Task status updated in database",
 		"task_id", taskID,
 		"status", status.String(),
