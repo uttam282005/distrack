@@ -8,79 +8,183 @@ A small distributed task scheduler composed of three services:
 - Postgres: storage for tasks.
 
 ## Architecture
-- Scheduler writes tasks into Postgres with a scheduled time.
-- Coordinator polls the DB and dispatches ready tasks to workers via gRPC (round-robin).
-- Workers send heartbeats to the Coordinator and execute received commands, writing output to `worker_output/`.
-- Workers report task status updates back to the Coordinator.
 
-## Addresses and ports
-- Coordinator listens on `:8080`. Workers must dial a resolvable host+port, e.g. `coordinator:8080` in Docker.
-- Worker listens on `:8000`. It reports its address via heartbeats:
-  - If `WORKER_ADDRESS` is set (e.g. `worker`), it reports `WORKER_ADDRESS + serverPort` → `worker:8000`.
-  - If not set, it reports its listener bind address (often `0.0.0.0:8000`), which is typically NOT reachable from other containers.
-- In `docker-compose.yml`, `WORKER_ADDRESS=worker` ensures the Coordinator can reach the worker at `worker:8000`.
+- **Scheduler** (HTTP `:8081`): API to schedule tasks into Postgres with a target execution time. Injects W3C `traceparent` context into DB records.
+- **Coordinator** (gRPC `:8080`): Polls Postgres for ready tasks, reifies trace context from the database, and dispatches tasks to registered workers via gRPC (round-robin).
+- **Workers** (gRPC `:8000`): Send heartbeats to the Coordinator, execute assigned shell commands, write output to `worker_output/`, and report execution lifecycle status back to the Coordinator.
+- **Postgres** (`:5433` host / `:5432` internal): Relational task queue and storage.
+- **LGTM Observability Stack**: Built-in OpenTelemetry instrumentation for distributed tracing (Tempo), metrics (Prometheus), and structured logs (Loki) visualized in Grafana.
 
-## Run with Docker Compose
-Environment variables required by Postgres (used by all services):
-- `POSTGRES_DB`
-- `POSTGRES_USER`
-- `POSTGRES_PASSWORD`
+---
 
-Compose defines service names with internal DNS:
-- Coordinator is reachable at `coordinator:8080`.
-- Postgres is reachable at `postgres:5432`.
-- Worker reports itself as `worker:8000`.
+## Observability (LGTM Stack + OpenTelemetry)
 
-## Start the stack:
+`distrack` features end-to-end observability out of the box using **OpenTelemetry (OTel)** and the **LGTM Stack**:
 
-Services: postgres, scheduler (:8081), coordinator (:8080), worker (:8000, internal)
-
-start n workers
-```/dev/null/shell#L1-3
-docker compose up --build --scale worker=n
+```
+ ┌───────────────┐     ┌─────────────────┐     ┌──────────────┐
+ │   Scheduler   │     │   Coordinator   │     │  Worker(s)   │
+ └───────┬───────┘     └────────┬────────┘     └──────┬───────┘
+         │ (OTLP gRPC)          │ (OTLP gRPC)         │ (OTLP gRPC)
+         └──────────────┬───────┴─────────────────────┘
+                        ▼
+         ┌──────────────────────────────┐
+         │ OpenTelemetry Collector :4317│
+         └──────┬───────────────┬───────┘
+                │               │
+        ┌───────┴──────┐ ┌──────┴────────┐ ┌────────────────┐
+        │ Tempo :3200  │ │Prometheus:9090│ │  Loki :3100    │
+        │   (Traces)   │ │   (Metrics)   │ │ (Corr. Logs)   │
+        └───────┬──────┘ └──────┬────────┘ └──────┬─────────┘
+                └───────────────┼─────────────────┘
+                                ▼
+                     ┌────────────────────┐
+                     │   Grafana :3000    │
+                     └────────────────────┘
 ```
 
+### Telemetry Signals
 
-# API usage (Scheduler)
-Schedule a task (execute a shell command after N seconds):
+1. **Distributed Tracing (Tempo)**:
+   - Tracks requests seamlessly through **HTTP (Scheduler) → PostgreSQL (Asynchronous Context Reification) → gRPC (Coordinator) → gRPC (Worker)**.
+   - W3C `traceparent` is persisted in the PostgreSQL `tasks` table, preserving causal context across asynchronous polling boundaries.
+2. **Metrics (Prometheus)**:
+   - Captures RED metrics (Request Rate, Error Rate, Duration) and worker saturation (USE method).
+   - Exported periodically via OTLP gRPC to the OpenTelemetry Collector and scraped by Prometheus.
+3. **Structured Logs (Loki)**:
+   - High-performance structured logging with trace and span IDs injected automatically for bidirectional Log-to-Trace correlation in Grafana.
+4. **Unified Visualizations (Grafana)**:
+   - Pre-provisioned datasources for Prometheus, Tempo, and Loki with Trace-to-Logs and Trace-to-Metrics cross-navigation enabled.
 
-```/dev/null/shell#L1-4
-curl -X POST http://localhost:8081/schedule \
-  -H "Content-Type: application/json" \
-  -d '{"command":"echo hello", "delay_seconds": 5}'
+### Observability Configuration Layout
+
+All observability configurations reside in the [`config/`](file:///home/uttam/dev/distrack/config/) directory:
+
+```
+config/
+├── docker-compose.lgtm.yml                       # LGTM stack Docker Compose specification
+├── grafana/
+│   └── provisioning/
+│       └── datasources/
+│           └── datasources.yaml                  # Pre-configured Grafana datasources
+├── loki/
+│   └── loki-config.yaml                          # Loki storage & TSDB schema config
+├── otel-collector/
+│   └── otel-collector-config.yaml                # OpenTelemetry Collector pipelines
+├── prometheus/
+│   └── prometheus.yml                            # Prometheus scrape configuration
+└── tempo/
+    └── tempo.yaml                                # Tempo trace storage & ingestion config
 ```
 
-## Check task status:
+---
 
-```/dev/null/shell#L1-1
-curl "http://localhost:8081/status?task_id=<TASK_ID>"
-```
+## Start the Stack Locally
 
-## Data and outputs
-- Task outputs from workers are written to `worker_output/` on the host (mounted into the worker container at `/app/output`).
-- Task lifecycle fields: scheduled_at, picked_at, started_at, completed_at, failed_at.
-
-## Notes and caveats
-- The worker's `coordinator` flag defaults to `:8080` (port-only). In containers, rely on Compose to pass a resolvable address. With Compose, the worker connects to `coordinator:8080`.
-- If you run services outside Compose, pass explicit hostnames:
-  - Worker: `--worker_port=:8000 --coordinator=localhost:8080`
-  - Coordinator: `--coordinator_port=:8080`
-  - Scheduler: `--scheduler_port=:8081`
-- Multiple workers should each have unique, reachable addresses. If you set the same `WORKER_ADDRESS` for all workers, the Coordinator will treat them as distinct IDs but connect them all to the same endpoint, losing per-instance addressing.
-
->> NOTE: This is not for production use. It is intended for development and testing purposes only.
-
-
-## Benchmark script
-Use `scripts/benchmark.sh` to run a basic end-to-end benchmark against the Scheduler API.
-It submits tasks, polls status until completion/failure, and reports throughput + latency summary.
+Use the local startup script ([`./scripts/start-local.sh`](file:///home/uttam/dev/distrack/scripts/start-local.sh) or `./start-local.sh`) to start both the core services and the observability infrastructure with automated health checks:
 
 ```bash
-./scripts/benchmark.sh -u http://localhost:8081 -n 100 -d 0 -c "echo hello"
+# Start all services with 1 worker
+./scripts/start-local.sh
+
+# Rebuild container images and scale to 3 workers
+./scripts/start-local.sh -w 3 -b
+
+# Check health and status of all containers
+./scripts/start-local.sh status
+
+# Follow real-time logs across all services
+./scripts/start-local.sh logs
+
+# Gracefully stop and tear down all containers
+./scripts/start-local.sh down
 ```
 
-See all options:
+### Endpoints & Web UIs
 
+| Service | Port / URL | Description |
+|---|---|---|
+| **Scheduler API** | `http://localhost:8081` | HTTP API for task scheduling and status |
+| **Coordinator** | `localhost:8080` | gRPC coordinator service |
+| **Postgres** | `localhost:5433` | Host port for PostgreSQL database |
+| **Grafana** | `http://localhost:3000` | Web UI (**User**: `admin`, **Password**: `admin`) |
+| **Prometheus** | `http://localhost:9090` | Prometheus Metrics Explorer |
+| **Tempo** | `http://localhost:3200` | Distributed tracing backend |
+| **Loki** | `http://localhost:3100` | Structured log aggregation API |
+| **OTel Collector** | `localhost:4317` (gRPC) / `4318` (HTTP) | Telemetry ingestion endpoint |
+
+---
+
+## API Usage (Scheduler)
+
+### Schedule a task
+Schedule a shell command to execute after $N$ seconds:
+
+```bash
+curl -X POST http://localhost:8081/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"command":"echo hello from distrack", "delay_seconds": 2}'
+```
+
+Response:
+```json
+{
+  "task_id": "3743f36b-eb21-4b8c-82d3-6461c94c84f6",
+  "command": "echo hello from distrack",
+  "scheduled_at": "2026-09-10T13:55:15.590224Z"
+}
+```
+
+### Check task status
+
+```bash
+curl "http://localhost:8081/status?task_id=3743f36b-eb21-4b8c-82d3-6461c94c84f6"
+```
+
+Response:
+```json
+{
+  "task_id": "3743f36b-eb21-4b8c-82d3-6461c94c84f6",
+  "command": "echo hello from distrack",
+  "scheduled_at": "2026-09-10T13:55:15.590224Z",
+  "picked_at": "2026-09-10T13:55:19.869541Z",
+  "started_at": "2026-09-10T13:55:20.722359Z",
+  "completed_at": "2026-09-10T13:55:20.742031Z"
+}
+```
+
+---
+
+## Data and Outputs
+
+- Task execution outputs are saved to `worker_output/<worker_id>_<task_id>.txt` on the host (mounted to `/app/output` inside worker containers).
+- Task lifecycle timestamp fields: `scheduled_at`, `picked_at`, `started_at`, `completed_at`, `failed_at`.
+
+---
+
+## Benchmark Script
+
+Run end-to-end load tests against the Scheduler API using [`scripts/benchmark.sh`](file:///home/uttam/dev/distrack/scripts/benchmark.sh):
+
+```bash
+# Submit 100 tasks and measure throughput & latency
+./scripts/benchmark.sh -u http://localhost:8081 -n 100 -d 0 -c "echo benchmark"
+```
+
+View options:
 ```bash
 ./scripts/benchmark.sh -h
 ```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_DB` | `distrack` | Database name |
+| `POSTGRES_USER` | `distrack` | Database user |
+| `POSTGRES_PASSWORD` | `password` | Database password |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OpenTelemetry Collector endpoint |
+| `OTEL_SERVICE_NAME` | Service-specific | Service identifier in traces/metrics |
+| `WORKER_ADDRESS` | `worker` | Hostname reported by worker to coordinator |

@@ -1,0 +1,79 @@
+name: distrack-observability
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    container_name: distrack-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    networks:
+      - distrack-net
+    depends_on:
+      - tempo
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: distrack-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - distrack-net
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: distrack-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"   # Tempo HTTP query / Jaeger UI compatibility
+    networks:
+      - distrack-net
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: distrack-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    ports:
+      - "3100:3100"   # Loki HTTP API
+    networks:
+      - distrack-net
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: distrack-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,flameGraph
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3000:3000"   # Grafana Web UI
+    networks:
+      - distrack-net
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+
+networks:
+  distrack-net:
+    name: distrack-net
+    external: true

@@ -1,3 +1,5 @@
+name: distrack
+
 services:
   postgres:
     build:
