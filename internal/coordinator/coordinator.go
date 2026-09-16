@@ -163,7 +163,7 @@ type scheduledTaskItem struct {
 }
 
 func (c *CoordinatorServer) executeAllScheduledTasks() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
 
 	tx, err := c.dbPool.Begin(ctx)
@@ -187,6 +187,7 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 	defer rows.Close()
 
 	var items []scheduledTaskItem
+	var taskIDs []string
 	for rows.Next() {
 		var id, command, traceparent string
 		if err := rows.Scan(&id, &command, &traceparent); err != nil {
@@ -201,6 +202,7 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 			},
 			traceparent: traceparent,
 		})
+		taskIDs = append(taskIDs, id)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -208,45 +210,77 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 		return
 	}
 
-	for _, item := range items {
-		// Resurrect parent trace context from PostgreSQL!
-		taskCtx := telemetry.ExtractTraceparent(ctx, item.traceparent)
-		taskCtx, span := c.tracer.Start(taskCtx, "coordinator.dispatch_task",
-			trace.WithAttributes(
-				attribute.String("task.id", item.task.GetTaskId()),
-				attribute.String("task.command", item.task.GetData()),
-			),
-		)
+	if len(items) == 0 {
+		return
+	}
 
-		if err := c.submitTaskToWorker(taskCtx, item.task); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.End()
-			c.logger.ErrorContext(taskCtx, "Failed to submit task to worker",
-				"task_id", item.task.GetTaskId(),
-				"error", err.Error(),
-			)
-			continue
-		}
-
-		if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = $1`, item.task.GetTaskId()); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.End()
-			c.logger.ErrorContext(taskCtx, "Failed to update task picked_at",
-				"task_id", item.task.GetTaskId(),
-				"error", err.Error(),
-			)
-			continue
-		}
-
-		span.End()
-		c.logger.InfoContext(taskCtx, "Dispatched task to worker", "task_id", item.task.GetTaskId())
+	// Batch mark all selected tasks as picked and commit immediately to release DB row locks
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = ANY($1)`, taskIDs); err != nil {
+		c.logger.ErrorContext(ctx, "Failed to batch update task picked_at", "error", err.Error())
+		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		c.logger.ErrorContext(ctx, "Failed to commit dispatch transaction", "error", err.Error())
+		return
 	}
+
+	// Dispatch tasks to workers concurrently using a worker pool
+	const maxDispatchWorkers = 20
+	numWorkers := len(items)
+	if numWorkers > maxDispatchWorkers {
+		numWorkers = maxDispatchWorkers
+	}
+
+	taskCh := make(chan scheduledTaskItem, len(items))
+	for _, item := range items {
+		taskCh <- item
+	}
+	close(taskCh)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range taskCh {
+				c.dispatchTask(ctx, item)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func (c *CoordinatorServer) dispatchTask(ctx context.Context, item scheduledTaskItem) {
+	// Resurrect parent trace context from PostgreSQL!
+	taskCtx := telemetry.ExtractTraceparent(ctx, item.traceparent)
+	taskCtx, span := c.tracer.Start(taskCtx, "coordinator.dispatch_task",
+		trace.WithAttributes(
+			attribute.String("task.id", item.task.GetTaskId()),
+			attribute.String("task.command", item.task.GetData()),
+		),
+	)
+	defer span.End()
+
+	if err := c.submitTaskToWorker(taskCtx, item.task); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		c.logger.ErrorContext(taskCtx, "Failed to submit task to worker",
+			"task_id", item.task.GetTaskId(),
+			"error", err.Error(),
+		)
+
+		// Revert picked_at so the task can be retried on next scan
+		if _, revertErr := c.dbPool.Exec(ctx, `UPDATE tasks SET picked_at = NULL WHERE id = $1`, item.task.GetTaskId()); revertErr != nil {
+			c.logger.ErrorContext(taskCtx, "Failed to revert task picked_at after dispatch failure",
+				"task_id", item.task.GetTaskId(),
+				"error", revertErr.Error(),
+			)
+		}
+		return
+	}
+
+	c.logger.InfoContext(taskCtx, "Dispatched task to worker", "task_id", item.task.GetTaskId())
 }
 
 func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartBeatResponse, error) {
