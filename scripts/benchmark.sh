@@ -2,29 +2,33 @@
 set -euo pipefail
 
 SCHEDULER_URL="http://localhost:8081"
+PROMETHEUS_URL="http://localhost:9090"
 TASKS=50
 DELAY_SECONDS=0
 POLL_INTERVAL=0.5
 TIMEOUT_SECONDS=120
 COMMAND='echo benchmark'
 CONNECT_TIMEOUT=3
-REQUEST_TIMEOUT=10
+REQUEST_TIMEOUT=30
 MAX_RETRIES=3
-RETRY_DELAY=0.2
+RETRY_DELAY=0.5
 
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [options]
 
-Robust end-to-end benchmark for distrack.
-The script submits tasks via /schedule, polls /status until each task is completed/failed,
-and prints throughput + latency metrics.
+High-throughput batch benchmark for distrack.
+Submits tasks in a single batch via /schedule/batch, monitors execution
+via Prometheus metrics without per-task status polling, and computes
+whole-system throughput using:
+  Throughput = number_of_tasks / (max(task_completed_time) - min(task_submission_time))
 
 Options:
   -u URL     Scheduler base URL (default: ${SCHEDULER_URL})
-  -n COUNT   Number of tasks to schedule (default: ${TASKS})
+  -m URL     Prometheus base URL (default: ${PROMETHEUS_URL})
+  -n COUNT   Number of tasks to schedule in batch (default: ${TASKS})
   -d SEC     delay_seconds for each task (default: ${DELAY_SECONDS})
-  -p SEC     Poll interval in seconds (default: ${POLL_INTERVAL})
+  -p SEC     Progress check interval in seconds (default: ${POLL_INTERVAL})
   -t SEC     Overall timeout in seconds (default: ${TIMEOUT_SECONDS})
   -c CMD     Command payload for each task (default: ${COMMAND})
   -h         Show this help
@@ -43,9 +47,10 @@ is_positive_number() {
   [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk "BEGIN {exit !($1 > 0)}"
 }
 
-while getopts ":u:n:d:p:t:c:h" opt; do
+while getopts ":u:m:n:d:p:t:c:h" opt; do
   case "$opt" in
     u) SCHEDULER_URL="$OPTARG" ;;
+    m) PROMETHEUS_URL="$OPTARG" ;;
     n) TASKS="$OPTARG" ;;
     d) DELAY_SECONDS="$OPTARG" ;;
     p) POLL_INTERVAL="$OPTARG" ;;
@@ -93,302 +98,279 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-now_ms() {
-  date +%s%3N
+now_epoch() {
+  date +%s.%3N
 }
 
 normalize_base_url() {
   printf '%s' "$1" | sed 's:/*$::'
 }
 
-extract_task_id() {
-  local raw="$1"
-  python3 - "$raw" <<'PY'
-import base64
-import json
-import sys
-
-raw = sys.argv[1]
-if not raw:
-    raise SystemExit(1)
-
-try:
-    value = json.loads(raw)
-except Exception:
-    raise SystemExit(1)
-
-obj = None
-if isinstance(value, dict):
-    obj = value
-elif isinstance(value, str):
-    # Scheduler can return a base64-encoded JSON blob due to []byte encoding.
-    try:
-        decoded = base64.b64decode(value).decode("utf-8")
-        nested = json.loads(decoded)
-        if isinstance(nested, dict):
-            obj = nested
-    except Exception:
-        pass
-
-    if obj is None:
-        try:
-            nested = json.loads(value)
-            if isinstance(nested, dict):
-                obj = nested
-        except Exception:
-            pass
-
-if not isinstance(obj, dict):
-    raise SystemExit(1)
-
-task_id = obj.get("task_id")
-if not isinstance(task_id, str) or not task_id.strip():
-    raise SystemExit(1)
-
-print(task_id)
-PY
-}
-
-extract_status() {
-  local raw="$1"
-  python3 - "$raw" <<'PY'
-import json
-import sys
-
-raw = sys.argv[1]
-if not raw:
-    print("pending")
-    raise SystemExit(0)
-
-try:
-    obj = json.loads(raw)
-except Exception:
-    print("pending")
-    raise SystemExit(0)
-
-if not isinstance(obj, dict):
-    print("pending")
-    raise SystemExit(0)
-
-if obj.get("completed_at"):
-    print("completed")
-elif obj.get("failed_at"):
-    print("failed")
-else:
-    print("pending")
-PY
-}
-
-curl_json() {
-  local method="$1"
-  local url="$2"
-  local payload="${3:-}"
-
-  local -i attempt=1
-  local response body status
-
-  while [ "$attempt" -le "$MAX_RETRIES" ]; do
-    if [ "$method" = "GET" ]; then
-      response=$(curl -sS \
-        --connect-timeout "$CONNECT_TIMEOUT" \
-        --max-time "$REQUEST_TIMEOUT" \
-        -w $'\n%{http_code}' \
-        -X GET "$url" 2>&1) || true
-    else
-      response=$(curl -sS \
-        --connect-timeout "$CONNECT_TIMEOUT" \
-        --max-time "$REQUEST_TIMEOUT" \
-        -H "Content-Type: application/json" \
-        -w $'\n%{http_code}' \
-        -X "$method" "$url" \
-        -d "$payload" 2>&1) || true
-    fi
-
-    status=${response##*$'\n'}
-    body=${response%$'\n'*}
-
-    if [[ "$status" =~ ^[0-9]{3}$ ]]; then
-      if [ "$status" -ge 200 ] && [ "$status" -lt 300 ]; then
-        printf '%s' "$body"
-        return 0
-      fi
-      if [ "$status" -ge 500 ] && [ "$attempt" -lt "$MAX_RETRIES" ]; then
-        sleep "$RETRY_DELAY"
-        attempt=$((attempt + 1))
-        continue
-      fi
-      echo "HTTP $status from $url: $body" >&2
-      return 1
-    fi
-
-    if [ "$attempt" -lt "$MAX_RETRIES" ]; then
-      sleep "$RETRY_DELAY"
-      attempt=$((attempt + 1))
-      continue
-    fi
-
-    echo "Request failed for $url: $response" >&2
-    return 1
-  done
-
-  return 1
-}
-
-percentile_95() {
-  python3 - "$1" <<'PY'
-import sys
-vals = [int(x) for x in open(sys.argv[1], encoding='utf-8') if x.strip()]
-if not vals:
-    print("n/a n/a n/a n/a")
-    raise SystemExit(0)
-vals.sort()
-n = len(vals)
-idx = max(0, min(n - 1, int((n * 0.95) - 1)))
-print(vals[0], round(sum(vals)/n, 2), vals[idx], vals[-1])
-PY
-}
-
 SCHEDULER_URL="$(normalize_base_url "$SCHEDULER_URL")"
+PROMETHEUS_URL="$(normalize_base_url "$PROMETHEUS_URL")"
 
-declare -a TASK_IDS=()
-declare -a FAILED_IDS=()
-declare -a TIMED_OUT_IDS=()
-declare -A SUBMIT_TIME_MS=()
-declare -A FINISH_TIME_MS=()
+# Query Prometheus instant vector query
+query_prom() {
+  local query="$1"
+  python3 - "$PROMETHEUS_URL" "$query" <<'PY'
+import json
+import sys
+import urllib.parse
+import urllib.request
 
-echo "Starting benchmark"
+base_url = sys.argv[1].rstrip('/')
+query = sys.argv[2]
+url = f"{base_url}/api/v1/query?query={urllib.parse.quote(query)}"
+
+try:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+        results = data.get("data", {}).get("result", [])
+        if results and "value" in results[0]:
+            val = float(results[0]["value"][1])
+            print(val)
+        else:
+            print("NaN")
+except Exception:
+    print("NaN")
+PY
+}
+
+echo "=========================================================="
+echo " Starting Distrack Batch Benchmark (Prometheus Telemetry) "
+echo "=========================================================="
 echo "Scheduler URL : $SCHEDULER_URL"
+echo "Prometheus URL: $PROMETHEUS_URL"
 echo "Tasks         : $TASKS"
 echo "Delay seconds : $DELAY_SECONDS"
-echo "Poll interval : $POLL_INTERVAL"
+echo "Check interval: $POLL_INTERVAL"
 echo "Timeout       : $TIMEOUT_SECONDS"
 echo "Command       : $COMMAND"
 echo
 
-echo "Submitting tasks..."
-submit_start_ms=$(now_ms)
-
-for i in $(seq 1 "$TASKS"); do
-  payload=$(python3 - "$COMMAND" "$DELAY_SECONDS" <<'PY'
-import json, sys
-print(json.dumps({"command": sys.argv[1], "delay_seconds": int(sys.argv[2])}))
-PY
-)
-
-  if ! response=$(curl_json "POST" "$SCHEDULER_URL/schedule" "$payload"); then
-    echo "Submission failed for task #$i" >&2
-    continue
-  fi
-
-  if ! task_id=$(extract_task_id "$response"); then
-    echo "Could not parse task_id for task #$i. Response: $response" >&2
-    continue
-  fi
-
-  TASK_IDS+=("$task_id")
-  SUBMIT_TIME_MS["$task_id"]=$(now_ms)
-done
-
-submit_end_ms=$(now_ms)
-submitted_count=${#TASK_IDS[@]}
-if [ "$submitted_count" -eq 0 ]; then
-  echo "No tasks submitted successfully. Exiting." >&2
+# 1. Verify Connectivity
+echo "[1/4] Checking Prometheus connection..."
+prom_test=$(query_prom "up or vector(1)")
+if [ "$prom_test" = "NaN" ]; then
+  echo "Error: Unable to connect to Prometheus at $PROMETHEUS_URL" >&2
+  echo "Please verify that the LGTM stack is running (e.g. ./scripts/start-local.sh)" >&2
   exit 1
 fi
 
-echo "Submitted $submitted_count/$TASKS task(s)."
-echo "Polling task statuses..."
+# 2. Capture Initial Baseline Metrics from Prometheus
+echo "[2/4] Capturing baseline metrics from Prometheus..."
+initial_executed=$(query_prom "sum(distrack_tasks_executed_total) or vector(0)")
+initial_success=$(query_prom "sum(distrack_tasks_executed_total{status='success'}) or vector(0)")
+initial_failed=$(query_prom "sum(distrack_tasks_executed_total{status='failed'}) or vector(0)")
 
-wait_start_ms=$(now_ms)
-timeout_ms=$(python3 - <<PY
-print(int(float("$TIMEOUT_SECONDS")*1000))
+if [ "$initial_executed" = "NaN" ]; then initial_executed=0; fi
+if [ "$initial_success" = "NaN" ]; then initial_success=0; fi
+if [ "$initial_failed" = "NaN" ]; then initial_failed=0; fi
+
+printf "Baseline: executed=%.0f, success=%.0f, failed=%.0f\n" "$initial_executed" "$initial_success" "$initial_failed"
+
+# 3. Generate and Submit Batch Request
+echo "[3/4] Preparing batch payload for $TASKS tasks..."
+batch_payload=$(python3 - "$COMMAND" "$DELAY_SECONDS" "$TASKS" <<'PY'
+import json, sys
+cmd = sys.argv[1]
+delay = int(sys.argv[2])
+n = int(sys.argv[3])
+payload = {
+    "tasks": [{"command": cmd, "delay_seconds": delay} for _ in range(n)]
+}
+print(json.dumps(payload))
 PY
 )
-deadline_ms=$((wait_start_ms + timeout_ms))
-pending=("${TASK_IDS[@]}")
 
-while [ "${#pending[@]}" -gt 0 ]; do
-  current_ms=$(now_ms)
-  if [ "$current_ms" -ge "$deadline_ms" ]; then
-    TIMED_OUT_IDS=("${pending[@]}")
+echo "Submitting batch to $SCHEDULER_URL/schedule/batch..."
+min_submission_time=$(now_epoch)
+
+submit_response=$(curl -sS \
+  --connect-timeout "$CONNECT_TIMEOUT" \
+  --max-time "$REQUEST_TIMEOUT" \
+  -H "Content-Type: application/json" \
+  -w "\n%{http_code}" \
+  -X POST "$SCHEDULER_URL/schedule/batch" \
+  -d "$batch_payload") || true
+
+http_code=$(echo "$submit_response" | tail -n1)
+resp_body=$(echo "$submit_response" | sed '$d')
+
+if [ "$http_code" != "200" ]; then
+  echo "Batch submission failed with HTTP $http_code: $resp_body" >&2
+  exit 1
+fi
+
+submission_end_time=$(now_epoch)
+submitted_count=$(python3 - "$resp_body" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(data.get("count", len(data.get("tasks", []))))
+except Exception:
+    print(0)
+PY
+)
+
+if [ "$submitted_count" -le 0 ]; then
+  echo "Invalid or empty response from scheduler: $resp_body" >&2
+  exit 1
+fi
+
+submit_duration_sec=$(python3 - "$submission_end_time" "$min_submission_time" <<'PY'
+import sys
+print(round(float(sys.argv[1]) - float(sys.argv[2]), 4))
+PY
+)
+
+printf "Successfully submitted %d tasks in batch (took %.3fs).\n" "$submitted_count" "$submit_duration_sec"
+
+# 4. Monitor Execution via Prometheus (NO polling of /status)
+echo "[4/4] Monitoring task execution via Prometheus (no /status polling)..."
+
+target_executed=$(python3 - "$initial_executed" "$submitted_count" <<'PY'
+import sys
+print(float(sys.argv[1]) + float(sys.argv[2]))
+PY
+)
+
+wait_start=$(now_epoch)
+max_completed_time=""
+timed_out=false
+
+while true; do
+  current_now=$(now_epoch)
+  elapsed=$(python3 - "$current_now" "$min_submission_time" <<'PY'
+import sys
+print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))
+PY
+)
+
+  current_executed=$(query_prom "sum(distrack_tasks_executed_total) or vector(0)")
+  if [ "$current_executed" != "NaN" ]; then
+    completed_so_far=$(python3 - "$current_executed" "$initial_executed" <<'PY'
+import sys
+print(max(0, int(float(sys.argv[1]) - float(sys.argv[2]))))
+PY
+)
+    printf "\r[Progress] Executed: %d / %d tasks (%.1fs elapsed)..." "$completed_so_far" "$submitted_count" "$elapsed"
+    
+    # Check if target reached
+    is_done=$(python3 - "$current_executed" "$target_executed" <<'PY'
+import sys
+print("yes" if float(sys.argv[1]) >= float(sys.argv[2]) else "no")
+PY
+)
+    if [ "$is_done" = "yes" ]; then
+      max_completed_time=$(now_epoch)
+      break
+    fi
+  fi
+
+  # Check timeout
+  is_timeout=$(python3 - "$elapsed" "$TIMEOUT_SECONDS" <<'PY'
+import sys
+print("yes" if float(sys.argv[1]) >= float(sys.argv[2]) else "no")
+PY
+)
+  if [ "$is_timeout" = "yes" ]; then
+    timed_out=true
+    max_completed_time=$(now_epoch)
     break
   fi
 
-  next_pending=()
-  for task_id in "${pending[@]}"; do
-    if ! status_response=$(curl_json "GET" "$SCHEDULER_URL/status?task_id=$task_id"); then
-      next_pending+=("$task_id")
-      continue
-    fi
-
-    status=$(extract_status "$status_response")
-    case "$status" in
-      completed)
-        FINISH_TIME_MS["$task_id"]=$current_ms
-        ;;
-      failed)
-        FINISH_TIME_MS["$task_id"]=$current_ms
-        FAILED_IDS+=("$task_id")
-        ;;
-      *)
-        next_pending+=("$task_id")
-        ;;
-    esac
-  done
-
-  pending=("${next_pending[@]}")
-  [ "${#pending[@]}" -gt 0 ] && sleep "$POLL_INTERVAL"
+  sleep "$POLL_INTERVAL"
 done
-
-end_ms=$(now_ms)
-completed_count=$((submitted_count - ${#FAILED_IDS[@]} - ${#TIMED_OUT_IDS[@]}))
-failed_count=${#FAILED_IDS[@]}
-timeout_count=${#TIMED_OUT_IDS[@]}
-submit_duration_ms=$((submit_end_ms - submit_start_ms))
-total_duration_ms=$((end_ms - submit_start_ms))
-
-lat_file=$(mktemp)
-for task_id in "${TASK_IDS[@]}"; do
-  finish=${FINISH_TIME_MS[$task_id]:-}
-  submit=${SUBMIT_TIME_MS[$task_id]:-}
-  if [ -n "$finish" ] && [ -n "$submit" ]; then
-    echo "$((finish - submit))" >> "$lat_file"
-  fi
-done
-
-read -r min_ms avg_ms p95_ms max_ms < <(percentile_95 "$lat_file")
-rm -f "$lat_file"
 
 echo
-echo "=== Benchmark Results ==="
-printf "Submitted tasks      : %d\n" "$submitted_count"
-printf "Completed tasks      : %d\n" "$completed_count"
-printf "Failed tasks         : %d\n" "$failed_count"
-printf "Timed out tasks      : %d\n" "$timeout_count"
-printf "Submit duration      : %.3fs\n" "$(python3 - <<PY
-print($submit_duration_ms/1000)
-PY
-)"
-printf "Total duration       : %.3fs\n" "$(python3 - <<PY
-print($total_duration_ms/1000)
-PY
-)"
-printf "Throughput (complete): %.2f tasks/s\n" "$(python3 - <<PY
-completed=$completed_count
-duration=$total_duration_ms/1000
-print((completed/duration) if duration > 0 else 0)
-PY
-)"
-printf "E2E latency min/avg/p95/max (ms): %s / %s / %s / %s\n" "$min_ms" "$avg_ms" "$p95_ms" "$max_ms"
+echo
 
-if [ "$timeout_count" -gt 0 ]; then
-  echo
-  echo "Timed out task IDs:"
-  printf '%s\n' "${TIMED_OUT_IDS[@]}"
-fi
+# Final Metrics Collection from Prometheus
+final_executed=$(query_prom "sum(distrack_tasks_executed_total) or vector(0)")
+final_success=$(query_prom "sum(distrack_tasks_executed_total{status='success'}) or vector(0)")
+final_failed=$(query_prom "sum(distrack_tasks_executed_total{status='failed'}) or vector(0)")
 
-if [ "$failed_count" -gt 0 ]; then
-  echo
-  echo "Failed task IDs:"
-  printf '%s\n' "${FAILED_IDS[@]}"
+tasks_completed=$(python3 - "$final_success" "$initial_success" <<'PY'
+import sys
+print(max(0, int(float(sys.argv[1]) - float(sys.argv[2]))))
+PY
+)
+
+tasks_failed=$(python3 - "$final_failed" "$initial_failed" <<'PY'
+import sys
+print(max(0, int(float(sys.argv[1]) - float(sys.argv[2]))))
+PY
+)
+
+total_processed=$((tasks_completed + tasks_failed))
+
+# Throughput using the user's proposed formula:
+# number_of_tasks / (max(task_completed_time) - min(task_submission_time))
+read -r throughput total_duration < <(python3 - "$total_processed" "$max_completed_time" "$min_submission_time" <<'PY'
+import sys
+n = float(sys.argv[1])
+max_comp = float(sys.argv[2])
+min_sub = float(sys.argv[3])
+duration = max(0.0001, max_comp - min_sub)
+tput = n / duration
+print(f"{tput:.2f} {duration:.3f}")
+PY
+)
+
+# Fetch Prometheus Latency Percentiles (exact ground-truth from OTel histograms)
+exec_p50=$(query_prom "histogram_quantile(0.50, sum(increase(distrack_task_execution_duration_seconds_bucket[5m])) by (le))")
+exec_p95=$(query_prom "histogram_quantile(0.95, sum(increase(distrack_task_execution_duration_seconds_bucket[5m])) by (le))")
+exec_p99=$(query_prom "histogram_quantile(0.99, sum(increase(distrack_task_execution_duration_seconds_bucket[5m])) by (le))")
+exec_avg=$(query_prom "sum(increase(distrack_task_execution_duration_seconds_sum[5m])) / sum(increase(distrack_task_execution_duration_seconds_count[5m]))")
+dispatch_p95=$(query_prom "histogram_quantile(0.95, sum(increase(distrack_coordinator_dispatch_duration_seconds_bucket[5m])) by (le))")
+active_workers=$(query_prom "distrack_coordinator_active_workers or vector(0)")
+max_queue=$(query_prom "max_over_time(distrack_worker_queue_depth[5m]) or vector(0)")
+
+fmt_metric() {
+  local val="$1"
+  if [ "$val" = "NaN" ]; then
+    echo "n/a"
+  else
+    python3 -c "import sys; print(f'{float(sys.argv[1])*1000:.2f} ms')" "$val"
+  fi
+}
+
+fmt_num() {
+  local val="$1"
+  if [ "$val" = "NaN" ]; then
+    echo "n/a"
+  else
+    python3 -c "import sys; print(f'{float(sys.argv[1]):.0f}')" "$val"
+  fi
+}
+
+echo "=========================================================="
+echo "                  Benchmark Results                       "
+echo "=========================================================="
+printf "Submitted tasks in batch : %d\n" "$submitted_count"
+printf "Completed tasks (success): %d\n" "$tasks_completed"
+printf "Failed tasks             : %d\n" "$tasks_failed"
+if [ "$timed_out" = true ]; then
+  printf "Status                   : TIMED OUT (after %ss)\n" "$TIMEOUT_SECONDS"
+else
+  printf "Status                   : COMPLETED\n"
 fi
+echo "----------------------------------------------------------"
+echo " Whole System Throughput (Proposed Formula):"
+echo "   Throughput = number_of_tasks / (max(completed) - min(submitted))"
+printf "   Formula calculation   : %d tasks / %.3fs\n" "$total_processed" "$total_duration"
+printf "   Whole System Throughput: %s tasks/sec\n" "$throughput"
+echo "----------------------------------------------------------"
+echo " Prometheus Ground-Truth Latency Breakdown:"
+printf "   Worker Execution p50  : %s\n" "$(fmt_metric "$exec_p50")"
+printf "   Worker Execution p95  : %s\n" "$(fmt_metric "$exec_p95")"
+printf "   Worker Execution p99  : %s\n" "$(fmt_metric "$exec_p99")"
+printf "   Worker Execution Avg  : %s\n" "$(fmt_metric "$exec_avg")"
+printf "   Coordinator Dispatch p95: %s\n" "$(fmt_metric "$dispatch_p95")"
+echo "----------------------------------------------------------"
+echo " Cluster Saturation Signals (Prometheus USE):"
+printf "   Active Workers in Pool: %s\n" "$(fmt_num "$active_workers")"
+printf "   Peak Worker Queue Depth: %s tasks\n" "$(fmt_num "$max_queue")"
+echo "=========================================================="

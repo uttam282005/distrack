@@ -2,9 +2,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uttam282005/distrack/internal/common"
 	"github.com/uttam282005/distrack/internal/db"
@@ -26,6 +29,15 @@ import (
 type SchduleTaskRequest struct {
 	Command      string `json:"command"`
 	DelaySeconds int64  `json:"delay_seconds"` // ISO 8601 format
+}
+
+type BatchScheduleTaskRequest struct {
+	Tasks []SchduleTaskRequest `json:"tasks"`
+}
+
+type BatchTaskResponse struct {
+	Tasks []TaskResponse `json:"tasks"`
+	Count int            `json:"count"`
 }
 
 type TaskResponse struct {
@@ -87,6 +99,7 @@ func (s *SchedulerServer) Start() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/schedule", otelhttp.NewHandler(http.HandlerFunc(s.handleScheduleTask), "scheduler.schedule"))
+	mux.Handle("/schedule/batch", otelhttp.NewHandler(http.HandlerFunc(s.handleScheduleBatchTasks), "scheduler.schedule_batch"))
 	mux.Handle("/status", otelhttp.NewHandler(http.HandlerFunc(s.handleTaskStatus), "scheduler.status"))
 
 	s.httpServer = &http.Server{
@@ -174,6 +187,105 @@ func (s *SchedulerServer) handleScheduleTask(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(commandResponse); err != nil {
 		s.logger.ErrorContext(r.Context(), "Failed to encode response", "error", err.Error())
+	}
+}
+
+func (s *SchedulerServer) handleScheduleBatchTasks(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	statusCode := http.StatusOK
+	defer func() {
+		s.metrics.RecordHTTPRequest(r.Context(), "schedule_batch", r.Method, statusCode, time.Since(start).Seconds())
+	}()
+
+	if r.Method != http.MethodPost {
+		statusCode = http.StatusMethodNotAllowed
+		http.Error(w, "Only POST request is allowed", statusCode)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		statusCode = http.StatusBadRequest
+		s.logger.WarnContext(r.Context(), "Failed to read batch request body", "error", err.Error())
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	trimmed := bytes.TrimSpace(bodyBytes)
+	var taskRequests []SchduleTaskRequest
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &taskRequests); err != nil {
+			statusCode = http.StatusBadRequest
+			s.logger.WarnContext(r.Context(), "Failed to decode batch schedule array", "error", err.Error())
+			http.Error(w, err.Error(), statusCode)
+			return
+		}
+	} else {
+		var batchReq BatchScheduleTaskRequest
+		if err := json.Unmarshal(trimmed, &batchReq); err != nil {
+			statusCode = http.StatusBadRequest
+			s.logger.WarnContext(r.Context(), "Failed to decode batch schedule object", "error", err.Error())
+			http.Error(w, err.Error(), statusCode)
+			return
+		}
+		taskRequests = batchReq.Tasks
+	}
+
+	if len(taskRequests) == 0 {
+		statusCode = http.StatusBadRequest
+		http.Error(w, "Batch must contain at least one task", statusCode)
+		return
+	}
+
+	tasks := make([]Task, 0, len(taskRequests))
+	now := time.Now().UTC()
+	for i, req := range taskRequests {
+		if req.DelaySeconds < 0 {
+			statusCode = http.StatusBadRequest
+			http.Error(w, fmt.Sprintf("Task #%d: delay_seconds must be >= 0", i), statusCode)
+			return
+		}
+		if req.DelaySeconds > 86400 {
+			statusCode = http.StatusBadRequest
+			http.Error(w, fmt.Sprintf("Task #%d: delay too large", i), statusCode)
+			return
+		}
+		tasks = append(tasks, Task{
+			Command:     req.Command,
+			ScheduledAt: now.Add(time.Duration(req.DelaySeconds * int64(time.Second))),
+		})
+	}
+
+	s.logger.InfoContext(r.Context(), "Received batch schedule request", "count", len(tasks))
+
+	taskIDs, err := s.insertBatchIntoDB(r.Context(), tasks)
+	if err != nil {
+		statusCode = http.StatusInternalServerError
+		s.metrics.RecordTasksScheduled(r.Context(), int64(len(tasks)), "failed")
+		s.logger.ErrorContext(r.Context(), "Failed to submit batch tasks", "error", err.Error())
+		http.Error(w, fmt.Sprintf("Failed to submit batch tasks. Error: %s", err.Error()), statusCode)
+		return
+	}
+
+	s.metrics.RecordTasksScheduled(r.Context(), int64(len(tasks)), "success")
+
+	respTasks := make([]TaskResponse, len(tasks))
+	for i, t := range tasks {
+		respTasks[i] = TaskResponse{
+			TaskID:      taskIDs[i],
+			Command:     t.Command,
+			ScheduledAt: t.ScheduledAt,
+		}
+	}
+
+	response := BatchTaskResponse{
+		Tasks: respTasks,
+		Count: len(respTasks),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.ErrorContext(r.Context(), "Failed to encode batch response", "error", err.Error())
 	}
 }
 
@@ -268,6 +380,39 @@ func (s *SchedulerServer) insertIntoDB(ctx context.Context, task Task) (string, 
 
 	span.SetAttributes(attribute.String("task.id", taskID))
 	return taskID, nil
+}
+
+func (s *SchedulerServer) insertBatchIntoDB(ctx context.Context, tasks []Task) ([]string, error) {
+	ctx, span := s.tracer.Start(ctx, "db.insert_batch_tasks",
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.Int("batch.size", len(tasks)),
+		),
+	)
+	defer span.End()
+
+	traceparent := telemetry.InjectTraceparent(ctx)
+	batch := &pgx.Batch{}
+	for _, task := range tasks {
+		batch.Queue("INSERT INTO tasks (command, scheduled_at, traceparent) VALUES ($1, $2, $3) RETURNING id",
+			task.Command, task.ScheduledAt, traceparent)
+	}
+
+	br := s.dbPool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	taskIDs := make([]string, 0, len(tasks))
+	for range tasks {
+		var id string
+		if err := br.QueryRow().Scan(&id); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
+		}
+		taskIDs = append(taskIDs, id)
+	}
+
+	return taskIDs, nil
 }
 
 func (s *SchedulerServer) awaitShutdown() error {

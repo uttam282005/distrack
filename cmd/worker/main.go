@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uttam282005/distrack/internal/telemetry"
 	"github.com/uttam282005/distrack/internal/worker"
 )
@@ -20,6 +22,14 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if os.Getenv("SERVICE_INSTANCE_ID") == "" {
+		if host, err := os.Hostname(); err == nil && host != "" {
+			os.Setenv("SERVICE_INSTANCE_ID", host)
+		} else {
+			os.Setenv("SERVICE_INSTANCE_ID", uuid.New().String())
+		}
+	}
 
 	// Initialize OpenTelemetry tracer and meter providers
 	shutdown, err := telemetry.InitTelemetry(ctx, "distrack-worker")

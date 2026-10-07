@@ -23,7 +23,3 @@ storage:
     local:
       path: /var/tempo/blocks
 
-overrides:
-  defaults:
-    metrics_generator:
-      processors: [service-graphs, span-metrics]

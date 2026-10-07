@@ -74,6 +74,68 @@ func TestScheduleHandlerValidation(t *testing.T) {
 	}
 }
 
+func TestScheduleBatchHandlerValidation(t *testing.T) {
+	logger := telemetry.NewLoggerWithWriter("test-scheduler", io.Discard, slog.LevelInfo)
+	server := NewServer(":8081", "", logger)
+
+	tests := []struct {
+		name           string
+		method         string
+		body           string
+		expectedStatus int
+	}{
+		{
+			name:           "MethodNotAllowed for GET",
+			method:         http.MethodGet,
+			body:           "",
+			expectedStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:           "BadRequest for invalid JSON",
+			method:         http.MethodPost,
+			body:           "{invalid-json}",
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "BadRequest for empty tasks array",
+			method:         http.MethodPost,
+			body:           `[]`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "BadRequest for empty tasks object",
+			method:         http.MethodPost,
+			body:           `{"tasks":[]}`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "BadRequest for negative delay in batch",
+			method:         http.MethodPost,
+			body:           `[{"command":"echo test", "delay_seconds": -1}]`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "BadRequest for excessive delay in batch",
+			method:         http.MethodPost,
+			body:           `{"tasks":[{"command":"echo test", "delay_seconds": 999999}]}`,
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/schedule/batch", bytes.NewBufferString(tc.body))
+			rec := httptest.NewRecorder()
+
+			server.handleScheduleBatchTasks(rec, req)
+
+			if rec.Code != tc.expectedStatus {
+				t.Errorf("expected status %d, got %d", tc.expectedStatus, rec.Code)
+			}
+		})
+	}
+}
+
 func TestStatusHandlerValidation(t *testing.T) {
 	logger := telemetry.NewLoggerWithWriter("test-scheduler", io.Discard, slog.LevelInfo)
 	server := NewServer(":8081", "", logger)

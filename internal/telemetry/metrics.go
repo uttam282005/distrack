@@ -72,11 +72,16 @@ func (m *SchedulerMetrics) RecordHTTPRequest(ctx context.Context, handler, metho
 
 // RecordTaskScheduled records a scheduled task event with its status (e.g. success, error).
 func (m *SchedulerMetrics) RecordTaskScheduled(ctx context.Context, status string) {
+	m.RecordTasksScheduled(ctx, 1, status)
+}
+
+// RecordTasksScheduled records multiple scheduled task events with its status.
+func (m *SchedulerMetrics) RecordTasksScheduled(ctx context.Context, count int64, status string) {
 	if m == nil {
 		return
 	}
 	attrs := metric.WithAttributes(attribute.String("status", status))
-	m.tasksScheduledTotal.Add(ctx, 1, attrs)
+	m.tasksScheduledTotal.Add(ctx, count, attrs)
 }
 
 // CoordinatorMetrics tracks RED and USE metrics for the Coordinator service.

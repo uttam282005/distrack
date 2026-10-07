@@ -82,8 +82,12 @@ func NewServer(port string, coordinator string, logger *slog.Logger) *WorkerServ
 
 func (w *WorkerServer) sendHeartbeat() error {
 	workerAddress := os.Getenv("WORKER_ADDRESS")
-	if workerAddress == "" {
-		workerAddress = w.listener.Addr().String()
+	if workerAddress == "" || workerAddress == "worker" {
+		if host, err := os.Hostname(); err == nil && host != "" {
+			workerAddress = host + w.serverPort
+		} else if w.listener != nil {
+			workerAddress = w.listener.Addr().String()
+		}
 	} else {
 		workerAddress += w.serverPort
 	}

@@ -39,13 +39,7 @@ func InitTracer(ctx context.Context, serviceName string) (*sdktrace.TracerProvid
 		return nil, nil, fmt.Errorf("failed to create otlp trace exporter: %w", err)
 	}
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewSchemaless(
-			semconv.ServiceNameKey.String(serviceName),
-			attribute.String("service.version", "1.0.0"),
-		),
-	)
+	res, err := newServiceResource(serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create resource: %w", err)
 	}
@@ -87,7 +81,7 @@ func InitMeter(ctx context.Context, serviceName string) (*sdkmetric.MeterProvide
 		return nil, nil, fmt.Errorf("failed to create otlp metric exporter: %w", err)
 	}
 
-	interval := 5 * time.Second
+	interval := 1 * time.Second
 	if envInterval := os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"); envInterval != "" {
 		if parsed, err := time.ParseDuration(envInterval); err == nil && parsed > 0 {
 			interval = parsed
@@ -96,13 +90,7 @@ func InitMeter(ctx context.Context, serviceName string) (*sdkmetric.MeterProvide
 
 	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(interval))
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewSchemaless(
-			semconv.ServiceNameKey.String(serviceName),
-			attribute.String("service.version", "1.0.0"),
-		),
-	)
+	res, err := newServiceResource(serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create metric resource: %w", err)
 	}
@@ -175,4 +163,28 @@ func ExtractTraceparent(parentCtx context.Context, traceparent string) context.C
 		"traceparent": traceparent,
 	}
 	return otel.GetTextMapPropagator().Extract(parentCtx, carrier)
+}
+
+func newServiceResource(serviceName string) (*resource.Resource, error) {
+	instanceID := os.Getenv("SERVICE_INSTANCE_ID")
+	if instanceID == "" {
+		instanceID = os.Getenv("HOSTNAME")
+	}
+	if instanceID == "" {
+		if host, err := os.Hostname(); err == nil && host != "" {
+			instanceID = host
+		}
+	}
+	if instanceID == "" {
+		instanceID = fmt.Sprintf("%s-%d", serviceName, time.Now().UnixNano())
+	}
+
+	return resource.Merge(
+		resource.Default(),
+		resource.NewSchemaless(
+			semconv.ServiceNameKey.String(serviceName),
+			semconv.ServiceInstanceIDKey.String(instanceID),
+			attribute.String("service.version", "1.0.0"),
+		),
+	)
 }

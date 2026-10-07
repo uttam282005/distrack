@@ -30,7 +30,7 @@ import (
 
 const (
 	defaultMaxMisses = 3
-	scanInterval     = common.DefaultHeartbeat * defaultMaxMisses
+	scanInterval     = 500 * time.Millisecond
 )
 
 type CoordinatorServer struct {
@@ -103,7 +103,7 @@ func (c *CoordinatorServer) Start() error {
 }
 
 func (c *CoordinatorServer) scanDatabase() {
-	ticker := time.NewTicker(scanInterval * time.Second)
+	ticker := time.NewTicker(scanInterval)
 	defer ticker.Stop()
 
 	for {
@@ -178,7 +178,7 @@ func (c *CoordinatorServer) executeAllScheduledTasks() {
 		}
 	}()
 
-	sql := "SELECT id, command, COALESCE(traceparent, '') FROM tasks WHERE scheduled_at < (NOW() + INTERVAL '30 seconds') AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED"
+	sql := "SELECT id, command, COALESCE(traceparent, '') FROM tasks WHERE scheduled_at <= NOW() AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED"
 	rows, err := tx.Query(ctx, sql)
 	if err != nil {
 		c.logger.ErrorContext(ctx, "Error executing query for scheduled tasks", "error", err.Error())
